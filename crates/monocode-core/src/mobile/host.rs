@@ -152,6 +152,8 @@ struct Watcher {
     sink: WatchSink,
 }
 struct Inner {
+    /// Explicit listeners never discover interfaces or open router mappings.
+    bind_addr: Option<std::net::SocketAddr>,
     config: Config,
     identity: Option<Identity>,
     endpoint: Option<quinn::Endpoint>,
@@ -183,12 +185,41 @@ impl MobileHost {
     /// Loads `path` (the desktop's `mobile-access.json`) and starts serving
     /// when mobile access is on. The app reads phone requests from the receiver.
     pub fn open(path: PathBuf) -> Result<(Self, async_channel::Receiver<Event>), String> {
-        let config: Config = if path.exists() {
+        Self::open_impl(path, None, None)
+    }
+
+    /// An isolated headless listener. The caller owns identity persistence.
+    /// Only this address is advertised; router mapping is always disabled,
+    /// even if an old settings file or a later configure call requests it.
+    pub fn open_at(
+        bind_addr: std::net::SocketAddr,
+        path: PathBuf,
+        identity: Identity,
+    ) -> Result<(Self, async_channel::Receiver<Event>), String> {
+        let ip = bind_addr.ip().to_canonical();
+        if ip.is_unspecified() || ip.is_multicast()
+            || matches!(ip, std::net::IpAddr::V4(v) if v.is_broadcast())
+        {
+            return Err("Mobile access requires an explicit unicast bind address".into());
+        }
+        Self::open_impl(path, Some(bind_addr), Some(identity))
+    }
+
+    fn open_impl(
+        path: PathBuf,
+        bind_addr: Option<std::net::SocketAddr>,
+        identity: Option<Identity>,
+    ) -> Result<(Self, async_channel::Receiver<Event>), String> {
+        let mut config: Config = if path.exists() {
             serde_json::from_slice(&std::fs::read(&path).map_err(|e| e.to_string())?)
                 .map_err(|e| format!("Mobile settings are invalid: {e}"))?
         } else {
             Config::default()
         };
+        if bind_addr.is_some() {
+            config.open_router = false;
+            config.remote_address.clear();
+        }
         let gate = Gate::default();
         for device in &config.devices {
             gate.allow(device.fingerprint.clone(), None);
@@ -197,8 +228,9 @@ impl MobileHost {
         let (events, receiver) = async_channel::bounded(64);
         let host = Self {
             inner: Arc::new(Mutex::new(Inner {
+                bind_addr,
                 config,
-                identity: None,
+                identity,
                 endpoint: None,
                 invitations: HashMap::new(),
                 catalog: json!({"projects":[],"monos":[],"sessions":[]}),
@@ -260,8 +292,12 @@ impl MobileHost {
             let mut inner = self.inner.lock().map_err(unavailable)?;
             let config = Config {
                 enabled,
-                open_router,
-                remote_address: remote_address.into(),
+                open_router: open_router && inner.bind_addr.is_none(),
+                remote_address: if inner.bind_addr.is_some() {
+                    String::new()
+                } else {
+                    remote_address.into()
+                },
                 devices: inner.config.devices.clone(),
             };
             self.save(&config)?;
@@ -398,7 +434,9 @@ impl MobileHost {
             monocode_mobile_link::server_endpoint(
                 &identity,
                 self.gate.clone(),
-                format!("[::]:{PORT}").parse().unwrap(),
+                inner
+                    .bind_addr
+                    .unwrap_or_else(|| ([0_u16; 8], PORT).into()),
             )
             .map_err(|error| {
                 // Another copy of the app (or the earlier desktop) holds the
@@ -558,8 +596,15 @@ impl MobileHost {
                 "sessions.list" => return Ok(session_page(&inner.catalog["sessions"], &params)),
                 _ => {}
             }
-            if !APP_METHODS.contains(&method) {
-                return Err("Unsupported mobile operation".into());
+            if !APP_METHODS.contains(&method)
+                && !(inner.bind_addr.is_some() && method == "session.send")
+            {
+                return Err(if inner.bind_addr.is_some() {
+                    "Unsupported on this host"
+                } else {
+                    "Unsupported mobile operation"
+                }
+                .into());
             }
             device
         };
@@ -604,7 +649,12 @@ impl MobileHost {
             return Err("Update MonoCode on both devices".into());
         }
         if request["method"] != "conversation.watch" {
-            return Err("Unsupported mobile operation".into());
+            return Err(if self.inner.lock().is_ok_and(|inner| inner.bind_addr.is_some()) {
+                "Unsupported on this host"
+            } else {
+                "Unsupported mobile operation"
+            }
+            .into());
         }
         let params = &request["params"];
         let conversation = params["conversationId"]
@@ -694,7 +744,10 @@ impl MobileHost {
 
     pub(super) fn router_config(&self) -> bool {
         self.inner.lock().is_ok_and(|inner| {
-            inner.config.enabled && inner.config.open_router && inner.endpoint.is_some()
+            inner.bind_addr.is_none()
+                && inner.config.enabled
+                && inner.config.open_router
+                && inner.endpoint.is_some()
         })
     }
     pub(super) fn router_result(&self, address: Option<Address>, status: String) {
@@ -704,9 +757,9 @@ impl MobileHost {
         }
     }
     pub(super) fn router_claim(&self) -> bool {
-        self.inner
-            .lock()
-            .is_ok_and(|mut inner| !std::mem::replace(&mut inner.router_started, true))
+        self.inner.lock().is_ok_and(|mut inner| {
+            inner.bind_addr.is_none() && !std::mem::replace(&mut inner.router_started, true)
+        })
     }
     pub(super) fn is_shut_down(&self) -> bool {
         self.shut_down.load(Ordering::SeqCst)
@@ -718,6 +771,17 @@ fn keyring_account(path: &Path) -> String {
 }
 
 fn addresses(inner: &Inner) -> Vec<Address> {
+    if let Some(bind) = inner.bind_addr {
+        let address = inner
+            .endpoint
+            .as_ref()
+            .and_then(|e| e.local_addr().ok())
+            .unwrap_or(bind);
+        return vec![Address {
+            host: address.ip().to_string(),
+            port: address.port(),
+        }];
+    }
     let mut result: Vec<Address> = if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
