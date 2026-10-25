@@ -1,9 +1,10 @@
 import { router, useLocalSearchParams } from "expo-router";
 import { Fragment } from "react";
-import { Alert, Linking, StyleSheet, Switch, Text, View } from "react-native";
+import { Linking, StyleSheet, Switch, Text, View } from "react-native";
 
 import { useConnection } from "@/features/connection/ConnectionProvider";
 import { MONOS_ENABLED } from "@/features/connection/selection";
+import { HostsSection } from "@/features/connection/HostPicker";
 import { useNotificationsBlocked } from "@/features/notifications/SessionNotifications";
 import { useAppearancePreference } from "@/features/settings/appearance";
 import { accessMode } from "@/features/models/access";
@@ -45,26 +46,6 @@ export default function SettingsScreen() {
   const params = project ? { projectId: project.id } : {};
   const connection = useConnection();
   const selected = connection.selection;
-  const disconnect = () =>
-    Alert.alert(
-      "Disconnect desktop?",
-      "You can pair again by scanning a new code. Your workspace choices will be remembered.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Disconnect",
-          style: "destructive",
-          onPress: () => {
-            void connection
-              .disconnect()
-              .then(() => router.replace("/"))
-              .catch((reason) =>
-                Alert.alert("Could not disconnect", String(reason)),
-              );
-          },
-        },
-      ],
-    );
   return (
     <SettingsPage>
       <View style={styles.desktop}>
@@ -84,6 +65,9 @@ export default function SettingsScreen() {
           </Text>
         </View>
       </View>
+
+      <Text style={styles.heading}>Hosts</Text>
+      <HostsSection />
 
       <Text style={styles.heading}>Notifications</Text>
       <View style={styles.card}>
@@ -191,16 +175,6 @@ export default function SettingsScreen() {
         />
       </View>
 
-      <View style={[styles.card, styles.lastCard]}>
-        <SettingsRow
-          icon="computerOff"
-          label="Disconnect desktop"
-          showChevron={false}
-          destructive
-          onPress={disconnect}
-        />
-      </View>
-
       {connection.error ? (
         <Text style={styles.error}>{connection.error}</Text>
       ) : null}
@@ -260,9 +234,6 @@ const useStyles = themedStyles((colors) => ({
     lineHeight: 18,
     marginTop: 8,
     marginHorizontal: 16,
-  },
-  lastCard: {
-    marginTop: 24,
   },
   error: {
     color: colors.deletions,

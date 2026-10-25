@@ -17,8 +17,16 @@ export type Harness =
   | "antigravity"
   | "devin";
 
+export type ProjectHost = {
+  fingerprint: string;
+  name: string;
+  project: Project;
+};
+
 export type Project = {
   id: string;
+  /** The paired machines that contain this folder; absent in a host catalog. */
+  hosts?: ProjectHost[];
   name: string;
   path: string;
   machine: string;
@@ -111,6 +119,9 @@ export type RuntimeMode = "supervised" | "auto-accept-edits" | "auto" | "full-ac
 export type SessionSummary = {
   id: string;
   projectId: string;
+  /** Added by the phone when sessions are combined across paired hosts. */
+  hostFingerprint?: string;
+  hostName?: string;
   monoId?: string;
   title: string;
   harness: Harness;

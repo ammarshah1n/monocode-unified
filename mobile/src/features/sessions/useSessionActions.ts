@@ -40,7 +40,7 @@ export function useSessionActions(
   const [removing, setRemoving] = useState<SessionSummary | null>(null);
   useEffect(() => {
     if (!removing) return;
-    deleteSession(removing.id)
+    deleteSession(removing.id, removing.hostFingerprint)
       .then(() => onDeleted(removing), failed("Could not delete the session"))
       .finally(() => setTimeout(() => setRemoving(null), REMOVE_MS));
     // Runs once per delete, with the rest as it was when it was asked for.

@@ -166,6 +166,11 @@ function SessionDetails({ session }: { session: SessionSummary }) {
           <Text style={[styles.meta, !session.branch && styles.noBranch]} numberOfLines={1}>
             {session.branch || "No branch"}
           </Text>
+          {session.hostName ? (
+            <View style={styles.machineTag}>
+              <Text style={styles.machineLabel} numberOfLines={1}>{session.hostName}</Text>
+            </View>
+          ) : null}
         </View>
         <View style={styles.model}>
           {model ? (
@@ -342,6 +347,14 @@ const useStyles = themedStyles((colors) => ({
     color: colors.muted,
     fontSize: 13,
   },
+  machineTag: {
+    maxWidth: 90,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 6,
+    backgroundColor: colors.fill,
+  },
+  machineLabel: { color: colors.muted, fontSize: 9, lineHeight: 12 },
   noBranch: {
     color: colors.faint,
   },

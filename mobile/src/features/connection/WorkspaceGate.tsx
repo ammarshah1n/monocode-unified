@@ -19,7 +19,9 @@ export function WorkspaceGate({ children }: { children: ReactNode }) {
         <ActivityIndicator color={colors.content} />
       </View>
     );
-  if (!connection.pairing) return <ConnectScreen />;
-  if (connection.selection === null) return <WorkspacePicker />;
+  if (!connection.pairing || connection.addingHost)
+    return <ConnectScreen onCancel={connection.pairing ? connection.cancelAddHost : undefined} />;
+  if (connection.selection === null)
+    return <WorkspacePicker key={connection.pairing.desktop.fingerprint} />;
   return children;
 }

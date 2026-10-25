@@ -26,7 +26,7 @@ Notifications.setNotificationHandler({
 });
 
 type Seen = Pick<SessionSummary, "busy" | "waiting">;
-type Data = { projectId: string; sessionId: string };
+type Data = { projectId: string; sessionId: string; fingerprint: string };
 const SESSION_CHANNEL = "sessions";
 
 /**
@@ -38,6 +38,7 @@ const SESSION_CHANNEL = "sessions";
 export function SessionNotifications() {
   const connection = useConnection();
   const preferences = useNotificationPreferences();
+  const fingerprint = connection.pairing?.desktop.fingerprint;
   const current = useRef(preferences);
   // Read by the effects below; kept up to date ahead of them.
   useEffect(() => {
@@ -77,7 +78,7 @@ export function SessionNotifications() {
   }, [anyOn, connection.pairing]);
 
   useEffect(() => {
-    if (!connection.connected) {
+    if (!connection.connected || !fingerprint) {
       seen.current = null;
       return;
     }
@@ -118,12 +119,13 @@ export function SessionNotifications() {
           data: {
             projectId: session.projectId,
             sessionId: session.id,
+            fingerprint,
           } satisfies Data,
         },
         trigger: Platform.OS === "android" ? { channelId: SESSION_CHANNEL } : null,
       });
     }
-  }, [connection.connected, connection.catalog]);
+  }, [connection.connected, connection.catalog, fingerprint]);
 
   // A tap opens the session, the app's last one too if it launched it.
   const response = Notifications.useLastNotificationResponse();
@@ -133,12 +135,13 @@ export function SessionNotifications() {
     const data = response.notification.request.content.data as
       Partial<Data> | undefined;
     void Notifications.clearLastNotificationResponseAsync();
-    if (!data?.projectId || !data.sessionId) return;
+    // A notification from another desktop must not open its IDs on this host.
+    if (!data?.projectId || !data.sessionId || data.fingerprint !== fingerprint) return;
     router.push({
       pathname: "/project/[projectId]/session/[sessionId]",
       params: { projectId: data.projectId, sessionId: data.sessionId },
     });
-  }, [response]);
+  }, [response, fingerprint]);
 
   return null;
 }

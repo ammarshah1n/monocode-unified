@@ -1,6 +1,6 @@
 import { useMemo, useSyncExternalStore } from "react";
 
-import type { SessionSummary } from "@/features/workspace/types";
+import type { ProjectHost, SessionSummary } from "@/features/workspace/types";
 
 /** How long a session that starts working elsewhere is marked as new. */
 export const ARRIVAL_MS = 12_000;
@@ -209,16 +209,18 @@ export function sessionActivity() {
 }
 
 /** A project's sessions at work, finished, and newly arrived. */
-export function useSessionActivity(projectId: string) {
+export function useSessionActivity(projectId: string, projectHosts?: readonly ProjectHost[]) {
   const current = useSyncExternalStore(subscribe, () => activity);
-  return useMemo(
-    () => ({
-      working: current.working.filter((session) => session.projectId === projectId),
-      finished: current.finished.filter(
-        (entry) => entry.session.projectId === projectId,
-      ),
+  return useMemo(() => {
+    const belongs = (session: SessionSummary) => projectHosts
+      ? projectHosts.some((host) =>
+          host.fingerprint === session.hostFingerprint && host.project.id === session.projectId,
+        )
+      : session.projectId === projectId;
+    return {
+      working: current.working.filter(belongs),
+      finished: current.finished.filter((entry) => belongs(entry.session)),
       arrivals: current.arrivals,
-    }),
-    [current, projectId],
-  );
+    };
+  }, [current, projectId, projectHosts]);
 }

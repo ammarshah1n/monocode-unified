@@ -5,8 +5,17 @@ export function projectForRoute<T extends { id: string; path: string }>(
   projects: readonly T[],
   projectId: string | undefined,
 ): T | undefined {
-  return (
-    projects.find((project) => project.id === projectId) ??
-    projects.find((project) => project.path === projectId)
-  );
+  const exact = projects.find((project) => project.id === projectId);
+  if (exact) return exact;
+  for (const project of projects) {
+    const hosts = (project as T & { hosts?: { project: T }[] }).hosts;
+    const local = hosts?.find((host) => host.project.id === projectId)?.project;
+    if (local) return {
+      ...project,
+      ...local,
+      ...("name" in project ? { name: project.name } : {}),
+      hosts,
+    } as T;
+  }
+  return projects.find((project) => project.path === projectId);
 }

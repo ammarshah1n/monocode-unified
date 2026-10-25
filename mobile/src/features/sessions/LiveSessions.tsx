@@ -24,7 +24,7 @@ import Animated, {
 } from "react-native-reanimated";
 import Svg, { Path } from "react-native-svg";
 
-import type { SessionSummary } from "@/features/workspace/types";
+import type { ProjectHost, SessionSummary } from "@/features/workspace/types";
 import { useWorkspace } from "@/features/workspace/WorkspaceProvider";
 import {
   GlassPresence,
@@ -69,11 +69,13 @@ const MINI_SPRING = { damping: 17, stiffness: 210, mass: 0.8 };
  */
 export function LiveSessions({
   projectId,
+  projectHosts,
   onOpen,
   inView,
   swiping,
 }: {
   projectId: string;
+  projectHosts?: ProjectHost[];
   onOpen: (session: SessionSummary) => void;
   inView: boolean;
   /** True while the screen's pages are moving; the ticker holds still then. */
@@ -91,6 +93,7 @@ export function LiveSessions({
   return (
     <LiveSessionsShown
       projectId={projectId}
+      projectHosts={projectHosts}
       onOpen={onOpen}
       swiping={swiping}
     />
@@ -99,14 +102,16 @@ export function LiveSessions({
 
 function LiveSessionsShown({
   projectId,
+  projectHosts,
   onOpen,
   swiping,
 }: {
   projectId: string;
+  projectHosts?: ProjectHost[];
   onOpen: (session: SessionSummary) => void;
   swiping?: SharedValue<boolean>;
 }) {
-  const { working, finished, arrivals } = useSessionActivity(projectId);
+  const { working, finished, arrivals } = useSessionActivity(projectId, projectHosts);
   // Titles as renamed here, ahead of the desktop.
   const { sessions } = useWorkspace();
   const live = useMemo(
@@ -233,7 +238,7 @@ function NowWorking({
   const stopSession = (picked: SessionSummary) => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     markStoppedHere(picked.id);
-    stop(picked.id).catch((reason) =>
+    stop(picked.id, picked.hostFingerprint).catch((reason) =>
       Alert.alert("Could not stop", String(reason)),
     );
   };

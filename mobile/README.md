@@ -27,6 +27,8 @@ The routes are in `src/app/`:
 
 Run the desktop app from the repository root, open **Settings → Mobile**, enable mobile access and choose **Pair device**. Scan the code in the mobile app, then choose the projects and monos to include. You can select nothing and choose later. **Mobile Settings → Projects and monos** changes the selection at any time; choices are remembered per desktop, including after reconnecting.
 
+The host chip at the top of the workspace switches between paired desktops. **Settings → Hosts → Add host** opens the same scan/paste flow without replacing existing hosts; cancel leaves the current host unchanged. Only the active host is polled and its projects, chats, and new sessions are used. Inactive hosts show **Not connected**, not an unverified reachability claim. **Remove host** forgets that host locally (revoke this phone separately on the desktop); workspace choices and the shared phone identity are retained. Existing single-host installations migrate automatically without re-pairing.
+
 Pairing codes expire after 15 minutes and work once. The shared Rust module uses QUIC and mutually authenticated TLS 1.3, with the desktop identity pinned by the code. Long-lived private keys are stored in the desktop OS keyring and the phone’s SecureStore. Desktop settings list paired devices and let you revoke them. Selection controls what appears on the phone; a paired device has workspace access.
 
 Remote connections go directly to the desktop. Automatic NAT-PMP/UPnP router mapping is enabled when mobile access is first enabled. A restrictive router or carrier NAT can require a reachable VPN address or manual UDP forwarding to port **38416**. Configure the remote address before generating a code. The desktop must remain awake and running.
@@ -54,6 +56,23 @@ npx eas-cli@latest build --platform ios --profile development-simulator
 ```
 
 Install the completed development build, then run `npm start` to connect it to Metro.
+
+## Build your own iPhone app (owner steps; not performed by the coding worker)
+
+Keep the whole repository, not just `mobile/`: the native Rust transport depends on the root Cargo workspace. Expo Go cannot run this app.
+
+1. In `app.json`, use an iOS bundle identifier your Apple team owns and set `ios.appleTeamId` to that team's ID. The checked-in `com.hardbeat920.monocode-mobile`, Expo owner `hardbeat920`, EAS project ID, and update URL belong to the upstream project, not automatically to your account. For a separate fork, choose your own bundle identifier; remove the upstream `owner`, `extra.eas.projectId`, and `updates.url` before linking your own EAS project. Set `owner` to your Expo account/organization if needed. Changing bundle identifier creates a separate installation: automatic pairing migration requires updating the existing app with its authorized bundle ID/signing team, without uninstalling it.
+2. **EAS physical iPhone build:** with your Expo account and paid Apple Developer team, run these from `mobile/` after intentionally configuring your own project:
+   ```bash
+   npm ci
+   npx eas-cli@latest login
+   npx eas-cli@latest init
+   npx eas-cli@latest build:configure
+   npx eas-cli@latest device:create
+   npx eas-cli@latest build --platform ios --profile development
+   ```
+   Register the intended iPhone, select the correct Apple team, and authorize certificate/provisioning creation when prompted. Install the resulting internal development build, enable Developer Mode on the phone, then run `npm start` to serve this checkout. A simulator-only alternative is `--profile development-simulator` (no device signing). Do not submit or publish an update to the upstream project. Configure updates for your own project separately before using EAS Update.
+3. **Local Mac/Xcode alternative:** install Xcode/iOS components and Rust/rustup, connect and trust the iPhone, enable Developer Mode, and sign into the correct team in Xcode. From `mobile/`, run `npm ci`, then `npm run ios -- --device`. This script builds the native Rust link before Expo prebuild/compile/install. If signing needs manual selection, open the generated `ios/*.xcworkspace` yourself, choose the app target → Signing & Capabilities → your team and owned bundle ID, choose the iPhone, then build/run. A free Personal Team may support local development subject to Apple's restrictions; it does not provide EAS ad-hoc/store distribution.
 
 ## Check the project
 

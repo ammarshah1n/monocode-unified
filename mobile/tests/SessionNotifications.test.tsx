@@ -23,6 +23,11 @@ const state = vi.hoisted(() => ({
   requestPermissions: vi.fn(),
   setChannel: vi.fn(),
   schedule: vi.fn(),
+  push: vi.fn(), clearResponse: vi.fn(),
+  response: null as null | {
+    actionIdentifier: string;
+    notification: { request: { content: { data: { projectId: string; sessionId: string; fingerprint: string } } } };
+  },
 }));
 
 vi.mock("react-native", () => ({
@@ -41,15 +46,16 @@ vi.mock("expo-notifications", () => ({
   requestPermissionsAsync: state.requestPermissions,
   setNotificationChannelAsync: state.setChannel,
   scheduleNotificationAsync: state.schedule,
-  useLastNotificationResponse: () => null,
+  useLastNotificationResponse: () => state.response,
+  clearLastNotificationResponseAsync: state.clearResponse,
   DEFAULT_ACTION_IDENTIFIER: "default",
   AndroidImportance: { DEFAULT: 3 },
   IosAuthorizationStatus: { NOT_DETERMINED: 0 },
 }));
-vi.mock("expo-router", () => ({ router: { push: vi.fn() } }));
+vi.mock("expo-router", () => ({ router: { push: state.push } }));
 vi.mock("@/features/connection/ConnectionProvider", () => ({
   useConnection: () => ({
-    pairing: state.paired ? "desktop" : null,
+    pairing: state.paired ? { desktop: { fingerprint: "desktop" } } : null,
     connected: state.paired,
     catalog: { sessions: state.sessions, projects: [] },
   }),
@@ -73,6 +79,7 @@ beforeEach(() => {
   state.paired = true;
   state.enabled = true;
   state.sessions = [];
+  state.response = null;
   state.settings = { status: "undetermined", canAskAgain: true };
   state.getPermissions.mockImplementation(async () => state.settings);
   state.requestPermissions.mockResolvedValue({ status: "granted" });
@@ -141,6 +148,16 @@ it.each(["android", "ios"])("routes immediate session alerts on %s", async (os) 
     content: expect.objectContaining({ body: "Finished" }),
     trigger: os === "android" ? { channelId: "sessions" } : null,
   }));
+});
+
+it.each(["desktop", "other-host"])("only opens notifications belonging to the active host (%s)", async (fingerprint) => {
+  state.response = {
+    actionIdentifier: "default",
+    notification: { request: { content: { data: { fingerprint, projectId: "project", sessionId: "session" } } } },
+  };
+  await render();
+  expect(state.clearResponse).toHaveBeenCalledOnce();
+  expect(state.push).toHaveBeenCalledTimes(fingerprint === "desktop" ? 1 : 0);
 });
 
 it.each([true, false])("reflects Android notification denial with canAskAgain %s and updates after returning from Settings", async (canAskAgain) => {
