@@ -650,6 +650,38 @@ mod tests {
     }
 
     #[gpui::test]
+    fn mixed_project_split_restores_and_archiving_one_project_rekeys_the_tab(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, foreign, local) = window(cx);
+        window
+            .update(cx, |shell, w, cx| {
+                shell.workspace.place(foreign, local, Edge::Left);
+                shell.open(foreign, w, cx);
+                let saved = serde_json::to_string(&shell.workspace).unwrap();
+                let sessions = shell
+                    .session_summaries
+                    .values()
+                    .map(|s| (s.id, s.cwd.clone()))
+                    .collect::<Vec<_>>();
+                let restored = Workspace::restore(
+                    Some(&saved),
+                    &sessions,
+                    &shell.workspace.project,
+                );
+                assert_eq!(restored.layout(local).leaf_ids(), [foreign, local]);
+                assert_eq!(restored.active, Some(foreign));
+                assert_eq!(restored.project, "/work/another-project");
+
+                shell.archive_project("/work/another-project", w, cx);
+                assert_eq!(shell.workspace.layout(local).leaf_ids(), [local]);
+                assert_eq!(shell.workspace.active, Some(local));
+                assert_eq!(shell.workspace.project, "/work/monocode");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn file_pane_grip_detaches_and_redocks_without_recreating_dirty_editors(
         cx: &mut TestAppContext,
     ) {

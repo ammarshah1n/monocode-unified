@@ -68,14 +68,35 @@ impl Shell {
                 TitleTab::Session(tab) => {
                     self.workspace.tabs.contains(tab) && {
                         let id = self.workspace.tab_focus(*tab);
-                        self.session_summaries
-                            .contains_key(&self.workspace.session_for_pane(id))
-                            && self
-                                .session_metadata(self.workspace.session_for_pane(id), cx)
-                                .summary
-                                .cwd
-                                == self.workspace.project
-                            && self.in_worktree_scope(id, cx)
+                        let owner = self.workspace.session_for_pane(id);
+                        self.session_summaries.contains_key(&owner) && {
+                            let focused = self.session_metadata(owner, cx);
+                            (self.project_matches_session(
+                                &self.workspace.project,
+                                &focused.summary.cwd,
+                            ) && self.in_worktree_scope(id, cx))
+                                || (self.workspace.layout(*tab).is_split()
+                                    && self
+                                        .workspace
+                                        .layout(*tab)
+                                        .leaf_ids()
+                                        .into_iter()
+                                        .any(|pane| {
+                                            let summary = &self
+                                                .session_metadata(
+                                                    self.workspace.session_for_pane(pane),
+                                                    cx,
+                                                )
+                                                .summary;
+                                            !self.project_matches_session(
+                                                &focused.summary.cwd,
+                                                &summary.cwd,
+                                            ) && self.project_matches_session(
+                                                &self.workspace.project,
+                                                &summary.cwd,
+                                            )
+                                        }))
+                        }
                     }
                 }
                 TitleTab::Mono {

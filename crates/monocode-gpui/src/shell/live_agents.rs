@@ -352,7 +352,25 @@ impl Shell {
                     .child(div().flex_1().min_w_0().truncate().child(project))
                     .children(elapsed.map(|elapsed| div().flex_shrink_0().child(elapsed))),
             )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                    this.skip_session_click = false;
+                    this.tab_drag = None;
+                    this.pane_drag = Some(PaneDrag {
+                        source: DragSource::Session(id),
+                        start: event.position,
+                        position: event.position,
+                        active: false,
+                        over: None,
+                        insert: None,
+                    });
+                }),
+            )
             .on_click(cx.listener(move |this, _, window, cx| {
+                if std::mem::take(&mut this.skip_session_click) {
+                    return;
+                }
                 this.selected_sessions.clear();
                 this.selection_anchor = Some(id);
                 this.open(id, window, cx);
