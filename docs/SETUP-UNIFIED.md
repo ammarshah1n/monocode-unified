@@ -46,7 +46,8 @@ node scripts/build-native.mjs        # ~15–30 min the first time
 
 Result: `crates/monocode-gpui/target/release/Monocode Native.app` (ad-hoc signed; it never needs notarising on your own Mac). Copy it to `~/Applications` and open it.
 
-- First launch asks to use a Keychain item: click **Always Allow**. A local rebuild changes the signature, so expect this prompt again after each rebuild. If the app opens but shows no window, a Keychain prompt is waiting — find it and approve it.
+- The phone identity is a private file next to the app settings (`mobile-identity.json`), not a Keychain item, so rebuilds and re-signing never raise a hidden prompt. If it is ever lost, the app makes a new one and you pair phones again.
+- To keep the Mac reachable from the phone, run the app under launchd (`RunAtLoad`, `KeepAlive` on crash) so it returns after a login or crash.
 - Check: the app opens and you can start a session.
 
 ## 2. Connect the Mac to the Linux host (this installs the host)
@@ -125,7 +126,7 @@ The sidecar talks to the MonoCode host on `127.0.0.1:3774`, so the host from ste
 
 ## Troubleshooting
 
-- App has no window after launch: approve the pending Keychain prompt.
+- Phone says a host is unreachable: turn Tailscale ON on the phone first (iOS pauses it), then check the host app/sidecar is running.
 - Phone cannot connect: Tailscale on, same account, sidecar active, port 38416/UDP reachable on the Tailscale IP.
 - Pairing QR expired: make a new one (15-minute lifetime).
 - Keep the main host awake (disable sleep) and logged in, or enable linger as above.

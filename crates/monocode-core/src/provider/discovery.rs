@@ -48,7 +48,7 @@ pub(super) fn matches(kind: Kind, path: &Path) -> bool {
         let _ = stdout.take(64 * 1024).read_to_string(&mut text);
         let _ = tx.send(text);
     });
-    let text = rx.recv_timeout(Duration::from_secs(3)).unwrap_or_default();
+    let text = rx.recv_timeout(Duration::from_secs(20)).unwrap_or_default();
     process::terminate(&mut child);
     drop(rx);
     let _ = reader.join();

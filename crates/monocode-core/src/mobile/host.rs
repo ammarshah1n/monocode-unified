@@ -480,26 +480,29 @@ impl MobileHost {
         std::fs::rename(&temporary, &self.path).map_err(|e| e.to_string())
     }
 
-    /// The desktop's long-lived identity, kept in the OS keyring under the same
-    /// entry the earlier desktop app used, so paired phones stay paired.
+    /// The desktop's long-lived identity, kept in a private file next to the
+    /// settings (like the Linux sidecar). The OS keyring is not used: its ACL is
+    /// tied to the app's code signature, so every re-sign raised a hidden prompt
+    /// that froze startup, and a lost entry left the host "on" but not listening.
     fn identity(&self) -> Result<Identity, String> {
         let mut inner = self.inner.lock().map_err(unavailable)?;
         if let Some(identity) = &inner.identity {
             return Ok(identity.clone());
         }
-        let entry = keyring::Entry::new("com.monocode.mobile", &keyring_account(&self.path))
-            .map_err(|e| e.to_string())?;
-        let identity = match entry.get_password() {
-            Ok(value) => serde_json::from_str(&value)
+        let file = self.path.with_file_name("mobile-identity.json");
+        let identity = match std::fs::read(&file) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
                 .map_err(|_| "Saved desktop mobile identity is invalid")?,
-            Err(keyring::Error::NoEntry) => {
-                if !inner.config.devices.is_empty() {
-                    return Err("Desktop mobile identity is missing. Remove paired devices before creating a new identity.".into());
-                }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let identity = Identity::generate()?;
-                entry
-                    .set_password(&serde_json::to_string(&identity).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
+                write_private(&file, &serde_json::to_vec(&identity).map_err(|e| e.to_string())?)?;
+                if !inner.config.devices.is_empty() {
+                    // Phones paired to the lost identity cannot connect anyway; drop
+                    // them so the host listens and they can pair again.
+                    inner.config.devices.clear();
+                    let config = inner.config.clone();
+                    self.save(&config)?;
+                }
                 identity
             }
             Err(error) => return Err(format!("Cannot read desktop mobile identity: {error}")),
@@ -766,8 +769,17 @@ impl MobileHost {
     }
 }
 
-fn keyring_account(path: &Path) -> String {
-    format!("desktop:{}", path.display())
+fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path.parent().ok_or("Invalid mobile identity path")?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let temporary = parent.join(format!(".mobile-identity-{}.json", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::io::Write::write_all(&mut options.open(&temporary).map_err(|e| e.to_string())?, bytes)
+        .map_err(|e| e.to_string())?;
+    std::fs::rename(&temporary, path).map_err(|e| e.to_string())
 }
 
 fn addresses(inner: &Inner) -> Vec<Address> {
