@@ -806,7 +806,7 @@ fn notes_reminders_search_and_read_only_connections_use_the_same_data() {
 fn streaming_write_reuses_last_written_blocks_without_reload_or_byte_changes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("shared.sqlite");
-    let store = Store::open_monocode(&path).unwrap();
+    let mut store = Store::open_monocode(&path).unwrap();
     let session = store.create("codex", "/project").unwrap();
     let original = store.persisted_session_id(session.id).unwrap();
     let mut transcript = Transcript::default();
@@ -815,9 +815,9 @@ fn streaming_write_reuses_last_written_blocks_without_reload_or_byte_changes() {
     transcript.begin("assistant");
     store.write_rows(session.id, 0, &transcript.rows).unwrap();
 
-    let shared = store.shared.as_ref().unwrap();
-    assert_eq!(shared.write_row_reloads.get(), 1);
-    let (last_written, _) = shared.last_written.borrow()[&session.id].clone();
+    assert_eq!(store.shared.as_ref().unwrap().write_row_reloads.get(), 1);
+    let (last_written, _) =
+        store.shared.as_ref().unwrap().last_written.borrow()[&session.id].clone();
     let start = transcript.append(" streamed");
     let expected = blocks::merge(&last_written, start, &transcript.rows[start..]).unwrap();
     let expected_bytes = encode(&expected).unwrap();
@@ -835,6 +835,7 @@ fn streaming_write_reuses_last_written_blocks_without_reload_or_byte_changes() {
         .unwrap();
     let actual: Vec<Value> = parse(&actual_bytes).unwrap();
     let revision = HistoryRevision::of(&actual);
+    let shared = store.shared.as_ref().unwrap();
     assert_eq!(actual_bytes, expected_bytes);
     assert_eq!(shared.write_row_reloads.get(), 1, "second flush uses cache");
     assert_eq!(shared.snapshots.borrow()[&session.id], revision);
@@ -845,7 +846,7 @@ fn streaming_write_reuses_last_written_blocks_without_reload_or_byte_changes() {
 fn streaming_write_reloads_and_preserves_source_after_an_external_commit() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("shared.sqlite");
-    let store = Store::open_monocode(&path).unwrap();
+    let mut store = Store::open_monocode(&path).unwrap();
     let session = store.create("codex", "/project").unwrap();
     let original = store.persisted_session_id(session.id).unwrap();
     let mut transcript = Transcript::default();
