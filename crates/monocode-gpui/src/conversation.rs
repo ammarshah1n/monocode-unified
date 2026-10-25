@@ -111,6 +111,7 @@ enum ComposerMenu {
     Setting(usize),
     /// The commit pill's chevron above the composer.
     GitActions,
+    Host,
 }
 struct OpenMenu {
     kind: ComposerMenu,
@@ -119,6 +120,13 @@ struct OpenMenu {
 }
 use response_menu::ResponseMenu;
 pub(crate) struct SessionChanged;
+pub(crate) struct ProjectHostSelected(pub(crate) String, pub(crate) Option<String>);
+#[derive(Clone, Debug)]
+pub(crate) struct HostChoice {
+    pub environment_id: String,
+    pub name: String,
+    pub mapped: bool,
+}
 pub(crate) struct ChooseFolder(pub(crate) AnchorSlot);
 /// The review card asked to open the session's recorded changes.
 pub(crate) struct OpenSessionChanges(pub(crate) crate::review::ReviewTab);
@@ -206,6 +214,11 @@ pub(crate) struct Conversation {
     add_anchor: AnchorSlot,
     model_anchor: AnchorSlot,
     access_anchor: AnchorSlot,
+    host_anchor: AnchorSlot,
+    host_project: Option<String>,
+    host_available: bool,
+    host_choices: Vec<HostChoice>,
+    selected_host: Option<String>,
     account_anchor: AnchorSlot,
     workspace_anchor: AnchorSlot,
     git_action_anchor: AnchorSlot,
@@ -643,6 +656,11 @@ impl Conversation {
             add_anchor: AnchorSlot::default(),
             model_anchor: AnchorSlot::default(),
             access_anchor: AnchorSlot::default(),
+            host_anchor: AnchorSlot::default(),
+            host_project: None,
+            host_available: false,
+            host_choices: Vec::new(),
+            selected_host: None,
             account_anchor: AnchorSlot::default(),
             workspace_anchor: AnchorSlot::default(),
             git_action_anchor: AnchorSlot::default(),
@@ -1468,6 +1486,7 @@ impl Conversation {
 }
 
 impl EventEmitter<SessionChanged> for Conversation {}
+impl EventEmitter<ProjectHostSelected> for Conversation {}
 impl EventEmitter<ChooseFolder> for Conversation {}
 impl EventEmitter<OpenSessionChanges> for Conversation {}
 impl EventEmitter<Transfer> for Conversation {}
@@ -1924,6 +1943,25 @@ impl Conversation {
             }
             return;
         }
+        if id == "host:this-mac" {
+            if let Some(project) = self.host_project.clone() {
+                self.selected_host = None;
+                cx.emit(ProjectHostSelected(project, None));
+            }
+            return;
+        }
+        if let Some(environment) = id.strip_prefix("host:") {
+            if self
+                .host_choices
+                .iter()
+                .any(|choice| choice.mapped && choice.environment_id == environment)
+                && let Some(project) = self.host_project.clone()
+            {
+                self.selected_host = Some(environment.to_owned());
+                cx.emit(ProjectHostSelected(project, Some(environment.to_owned())));
+            }
+            return;
+        }
         if let Some(id) = id.strip_prefix("usage-account:") {
             if let Some(center) = crate::accounts::get(cx) {
                 let kind = Kind::from_id(&self.summary.provider);
@@ -2252,6 +2290,70 @@ impl Conversation {
         cx.emit(SessionChanged);
         true
     }
+    pub(crate) fn configure_project_hosts(
+        &mut self,
+        project: String,
+        available: bool,
+        choices: Vec<HostChoice>,
+        selected: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.host_project = Some(project);
+        self.host_available = available;
+        self.host_choices = choices;
+        self.selected_host = selected;
+        cx.notify();
+    }
+    pub(crate) fn select_project_host(
+        &mut self,
+        project: &str,
+        selected: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.host_project.as_deref() == Some(project) {
+            self.selected_host = selected;
+            cx.notify();
+        }
+    }
+    fn has_host_choices(&self) -> bool {
+        self.host_available
+    }
+    fn selected_host_label(&self) -> &str {
+        self.selected_host
+            .as_deref()
+            .and_then(|environment| {
+                self.host_choices
+                    .iter()
+                    .find(|choice| choice.environment_id.as_str() == environment && choice.mapped)
+            })
+            .map_or("This Mac", |choice| choice.name.as_str())
+    }
+    fn project_host_menu_items(&self) -> Vec<MenuItem> {
+        let mut items = vec![
+            MenuItem::Header("New session host".into()),
+            MenuAction::new("host:this-mac", "This Mac")
+                .icon("laptop")
+                .checked(self.selected_host.is_none())
+                .into(),
+        ];
+        items.extend(self.host_choices.iter().map(|choice| {
+            let description: SharedString = if choice.mapped {
+                "New sessions will run on this machine.".into()
+            } else {
+                format!("Open this folder on {} first", choice.name).into()
+            };
+            MenuAction::new(
+                format!("host:{}", choice.environment_id),
+                choice.name.clone(),
+            )
+            .icon("server")
+            .checked(self.selected_host.as_deref() == Some(choice.environment_id.as_str()))
+            .disabled(!choice.mapped)
+            .description(description)
+            .into()
+        }));
+        items
+    }
     fn menu_is(&self, kind: ComposerMenu) -> bool {
         self.menu.as_ref().is_some_and(|open| open.kind == kind)
     }
@@ -2260,6 +2362,7 @@ impl Conversation {
             ComposerMenu::Add => &self.add_anchor,
             ComposerMenu::Model | ComposerMenu::Recent => &self.model_anchor,
             ComposerMenu::Access => &self.access_anchor,
+            ComposerMenu::Host => &self.host_anchor,
             ComposerMenu::Account => &self.account_anchor,
             ComposerMenu::Workspace => &self.workspace_anchor,
             ComposerMenu::GitActions => &self.git_action_anchor,
@@ -2540,6 +2643,12 @@ impl Conversation {
                 let items = self.mono_access_options();
                 ("Access", items, 288., MenuStyle::Access)
             }
+            ComposerMenu::Host => (
+                "New session host",
+                self.project_host_menu_items(),
+                280.,
+                MenuStyle::Composer,
+            ),
             ComposerMenu::Setting(ix) => self.mono_setting_menu(ix),
         }
     }
@@ -2900,6 +3009,20 @@ impl Conversation {
                                             .child(icon("chevron-down", 12.)),
                                     )
                                     .children(controls)
+                                    .when(self.has_host_choices(), |d| {
+                                        d.child(
+                                            tool_pill("composer-host", "Host")
+                                                .aria_label(format!("New session host, {}", self.selected_host_label()))
+                                                .aria_expanded(self.menu_is(ComposerMenu::Host))
+                                                .child(self.host_anchor.probe())
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.toggle_menu(ComposerMenu::Host, window, cx)
+                                                }))
+                                                .child(icon("server", 14.))
+                                                .child(pill_label(self.selected_host_label()))
+                                                .child(icon("chevron-down", 12.)),
+                                        )
+                                    })
                                     .child(
                                         tool_pill("composer-access", "Access")
                                             .aria_label(format!(

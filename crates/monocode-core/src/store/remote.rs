@@ -14,13 +14,97 @@ use std::collections::{BTreeMap, HashMap};
 const PROJECTS: &str = "remote-projects.v2";
 const SESSIONS: &str = "remote-sessions.v1";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteProject {
     pub key: String,
     pub environment_id: String,
     pub project_id: String,
     pub cwd: String,
+}
+
+/// Local projects mapped to one host project per machine environment.
+pub type ProjectMappings = BTreeMap<String, BTreeMap<String, RemoteProject>>;
+
+fn folder_name(path: &str) -> Option<&str> {
+    let path = path.trim_end_matches(['/', '\\']);
+    let name = path.rsplit(['/', '\\']).next()?;
+    (!name.is_empty()).then_some(name)
+}
+
+/// Infer links only when a folder name identifies one local project and one
+/// remote project on that machine. Ambiguous names remain separate projects.
+pub fn auto_link_projects(
+    local_projects: &[String],
+    remote_projects: impl IntoIterator<Item = RemoteProject>,
+) -> ProjectMappings {
+    let local_names: HashMap<String, Vec<&String>> = {
+        let mut names: HashMap<String, Vec<&String>> = HashMap::new();
+        for path in local_projects {
+            if path.starts_with(crate::remote::REMOTE_PATH_PREFIX) {
+                continue;
+            }
+            if let Some(name) = folder_name(path) {
+                names.entry(name.to_lowercase()).or_default().push(path);
+            }
+        }
+        names
+    };
+    let remote_projects: Vec<_> = remote_projects
+        .into_iter()
+        .filter_map(|project| {
+            folder_name(&project.cwd)
+                .map(|name| (project.environment_id.clone(), name.to_lowercase(), project))
+        })
+        .collect();
+    let mut remote_counts = HashMap::new();
+    for (environment, name, _) in &remote_projects {
+        *remote_counts
+            .entry((environment.clone(), name.clone()))
+            .or_insert(0usize) += 1;
+    }
+    let mut mappings = ProjectMappings::new();
+    for (environment, name, project) in remote_projects {
+        let Some(local) = local_names.get(&name).filter(|matches| matches.len() == 1) else {
+            continue;
+        };
+        if remote_counts.get(&(environment.clone(), name.clone())) != Some(&1) {
+            continue;
+        }
+        mappings
+            .entry(local[0].to_string())
+            .or_default()
+            .insert(environment, project);
+    }
+    mappings
+}
+
+/// The local project key corresponding to a persisted remote project key.
+pub fn local_project_for_remote<'a>(
+    mappings: &'a ProjectMappings,
+    remote_key: &str,
+) -> Option<&'a str> {
+    mappings.iter().find_map(|(local, hosts)| {
+        hosts
+            .values()
+            .any(|project| project.key == remote_key)
+            .then_some(local.as_str())
+    })
+}
+
+/// Resolve the cwd to pass to Store::create. None is the local machine.
+pub fn project_cwd_for_host(
+    local_project: &str,
+    mappings: &ProjectMappings,
+    environment_id: Option<&str>,
+) -> Option<String> {
+    match environment_id {
+        None => Some(local_project.to_owned()),
+        Some(environment) => mappings
+            .get(local_project)?
+            .get(environment)
+            .map(|project| project.key.clone()),
+    }
 }
 
 /// Local bytes needed to retry the same journaled attachment references.
@@ -108,6 +192,13 @@ fn adopt_host_configuration(settings: &mut Settings, host: Settings) {
 }
 
 impl Store {
+    pub fn project_mappings(&self, local_projects: &[String]) -> Result<ProjectMappings, String> {
+        Ok(auto_link_projects(
+            local_projects,
+            self.remote_projects()?.into_values(),
+        ))
+    }
+
     pub fn remote_projects(&self) -> Result<BTreeMap<String, RemoteProject>, String> {
         let mut projects: BTreeMap<String, RemoteProject> = self
             .desktop_preferences()
@@ -518,6 +609,77 @@ mod tests {
             "session":{"id":id,"harness":"codex","title":"Host conversation","model":"codex:live-model",
                 "runtimeMode":"auto","modelSettings":{"reasoningEffort":"high"},"cwd":"/host/repo/worktree",
                 "blocks":[{"id":"prompt","role":"user","text":"hello"}]}})
+    }
+
+    #[test]
+    fn project_mappings_auto_link_unique_case_insensitive_folder_names() {
+        let local = vec![
+            "/Users/me/Ops".to_owned(),
+            "/Users/me/other".to_owned(),
+            "remote://old/home/Ops".to_owned(),
+        ];
+        let remote = vec![
+            RemoteProject {
+                key: "remote://fedora/home/ops".into(),
+                environment_id: "fedora".into(),
+                project_id: "remote-ops".into(),
+                cwd: "/home/ops".into(),
+            },
+            RemoteProject {
+                key: "remote://air/Users/me/ops".into(),
+                environment_id: "air".into(),
+                project_id: "air-ops".into(),
+                cwd: "/Users/me/ops".into(),
+            },
+        ];
+        let mappings = auto_link_projects(&local, remote.clone());
+        assert_eq!(mappings["/Users/me/Ops"]["fedora"], remote[0]);
+        assert_eq!(mappings["/Users/me/Ops"]["air"], remote[1]);
+        assert_eq!(
+            local_project_for_remote(&mappings, &remote[0].key),
+            Some("/Users/me/Ops")
+        );
+        assert_eq!(
+            local_project_for_remote(&mappings, "remote://other/home/ops"),
+            None
+        );
+    }
+
+    #[test]
+    fn selected_host_resolves_to_its_unchanged_remote_project_key() {
+        let local = vec!["/Users/me/Ops".to_owned()];
+        let remote = RemoteProject {
+            key: "remote://fedora/home/Ops".into(),
+            environment_id: "fedora".into(),
+            project_id: "ops".into(),
+            cwd: "/home/Ops".into(),
+        };
+        let mappings = auto_link_projects(&local, [remote.clone()]);
+        assert_eq!(
+            project_cwd_for_host("/Users/me/Ops", &mappings, Some("fedora")).as_deref(),
+            Some(remote.key.as_str())
+        );
+    }
+
+    #[test]
+    fn ambiguous_names_stay_unlinked_and_cwd_resolution_keeps_existing_paths() {
+        let locals = vec!["/one/Ops".to_owned(), "/two/ops".to_owned()];
+        let remote = RemoteProject {
+            key: "remote://fedora/home/Ops".into(),
+            environment_id: "fedora".into(),
+            project_id: "remote-ops".into(),
+            cwd: "/home/Ops".into(),
+        };
+        let mappings = auto_link_projects(&locals, [remote]);
+        assert!(mappings.is_empty());
+        assert_eq!(
+            project_cwd_for_host("/local/Ops", &mappings, None).as_deref(),
+            Some("/local/Ops")
+        );
+        assert_eq!(
+            project_cwd_for_host("/local/Ops", &mappings, Some("fedora")),
+            None
+        );
     }
 
     #[test]

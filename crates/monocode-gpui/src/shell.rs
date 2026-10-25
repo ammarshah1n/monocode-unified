@@ -42,7 +42,7 @@ mod title_tabs;
 mod worktrees;
 
 use crate::{
-    conversation::{Conversation, SessionChanged},
+    conversation::{Conversation, HostChoice, ProjectHostSelected, SessionChanged},
     input,
     notes::Notes,
     pane_layout::{Edge, LayoutLeaf, Rect, SplitDir},
@@ -572,6 +572,8 @@ pub(crate) struct Shell {
     tabs_frame: Entity<Chrome>,
     store: Database,
     remote: Arc<monocode_core::remote::Connections>,
+    remote_machines: Vec<monocode_core::remote::Machine>,
+    project_links: monocode_core::store::ProjectMappings,
     remote_project_picker: Option<remote_projects::Open>,
     remote_refreshing: bool,
     remote_marks: HashMap<i64, (bool, bool)>,
@@ -777,6 +779,7 @@ impl Shell {
                 std::env::temp_dir().join(format!("monocode-remote-{}", std::process::id()))
             });
         let remote = Arc::new(monocode_core::remote::Connections::new(remote_dir));
+        let remote_machines = remote.list().unwrap_or_default();
         monocode_core::remote::set_default_connections(remote.clone());
         let quit_remote = remote.clone();
         cx.on_app_quit(move |_, cx| {
@@ -800,7 +803,15 @@ impl Shell {
             }
         });
         let metadata: Vec<_> = summaries.iter().map(|s| (s.id, s.cwd.clone())).collect();
-        let workspace = Workspace::restore(saved.as_deref(), &metadata, &cwd);
+        let mut workspace = Workspace::restore(saved.as_deref(), &metadata, &cwd);
+        let project_links = locked(&store)
+            .and_then(|store| store.project_mappings(&workspace.projects))
+            .unwrap_or_default();
+        if let Some(local) =
+            monocode_core::store::local_project_for_remote(&project_links, &workspace.project)
+        {
+            workspace.project = local.to_owned();
+        }
         monocode_core::cli::initialize(&workspace.preferences.binary_paths);
         let latest_state = Arc::new(Mutex::new(serde_json::to_string(&workspace).unwrap()));
         let quit_state = latest_state.clone();
@@ -927,6 +938,8 @@ impl Shell {
             tabs_frame,
             store,
             remote,
+            remote_machines,
+            project_links,
             remote_project_picker: None,
             remote_refreshing: false,
             remote_marks: HashMap::new(),
@@ -1223,7 +1236,8 @@ impl Shell {
         self.trim_session_histories(&shown, cx);
     }
     fn add(&mut self, summary: Session, cx: &mut Context<Self>) {
-        self.workspace.add_project(&summary.cwd);
+        let project = self.canonical_project_path(&summary.cwd);
+        self.workspace.add_project(&project);
         self.add_loaded(summary, cx);
     }
     /// Loading history must not turn every session directory into a rail project.
@@ -1237,9 +1251,11 @@ impl Shell {
             .insert(id, cx.new(|_| SessionMark::new(summary.provider.clone())));
         self.tab_marks
             .insert(id, cx.new(|_| SessionMark::tab(summary.provider.clone())));
+        let summary_cwd = summary.cwd.clone();
         let appearance = self.appearance(&summary.cwd);
         let worktree = self.session_worktrees.get(&id).cloned().flatten();
         let view = cx.new(|cx| Conversation::new(summary, self.store.clone(), cx));
+        self.configure_project_hosts(&view, &summary_cwd, cx);
         view.update(cx, |view, cx| {
             // Events may arrive before the first asynchronous agent load. Seed
             // the indexed working directory so those events cannot erase it.
@@ -1253,6 +1269,28 @@ impl Shell {
                 transcript.apply_preferences(&self.workspace.preferences, cx)
             });
         });
+        self.observations.push(cx.subscribe(
+            &view,
+            move |this, _, event: &ProjectHostSelected, cx| {
+                let project = event.0.clone();
+                let selected = event.1.clone();
+                if let Some(environment) = &selected {
+                    this.workspace
+                        .project_hosts
+                        .insert(project.clone(), environment.clone());
+                } else {
+                    this.workspace.project_hosts.remove(&project);
+                }
+                for (&other_id, other) in &this.sessions {
+                    if other_id != id {
+                        other.update(cx, |view, cx| {
+                            view.select_project_host(&project, selected.clone(), cx)
+                        });
+                    }
+                }
+                this.persist(cx);
+            },
+        ));
         self.observations
             .push(cx.subscribe(&view, move |this, _, _: &SessionChanged, cx| {
                 let Some(view) = this.sessions.get(&id) else {
@@ -1983,7 +2021,12 @@ impl Shell {
                 && self
                     .sessions
                     .get(&self.workspace.session_for_pane(*pane))
-                    .is_some_and(|s| s.read(cx).summary.cwd == self.workspace.project)
+                    .is_some_and(|s| {
+                        self.project_matches_session(
+                            &self.workspace.project,
+                            &s.read(cx).summary.cwd,
+                        )
+                    })
                 && self.in_worktree_scope(*pane, cx)
                 && self
                     .workspace
@@ -3883,7 +3926,7 @@ impl Shell {
         };
         self.history.record(id);
         self.workspace.open(id);
-        self.workspace.project = view.read(cx).summary.cwd.clone();
+        self.workspace.project = self.canonical_project_path(&view.read(cx).summary.cwd);
         self.workspace
             .project_focus
             .insert(self.workspace.project.clone(), id);
@@ -3994,6 +4037,7 @@ impl Shell {
     }
 
     fn select_project(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let path = self.canonical_project_path(&path);
         self.selected_sessions.clear();
         self.selection_anchor = None;
         self.sidebar_target = None;
@@ -4050,11 +4094,13 @@ impl Shell {
                     && self
                         .session_summaries
                         .contains_key(&self.workspace.session_for_pane(*id))
-                    && self
-                        .session_metadata(self.workspace.session_for_pane(*id), cx)
-                        .summary
-                        .cwd
-                        == path
+                    && self.project_matches_session(
+                        &path,
+                        &self
+                            .session_metadata(self.workspace.session_for_pane(*id), cx)
+                            .summary
+                            .cwd,
+                    )
                     && self.in_worktree_scope(*id, cx)
             })
             .or_else(|| {
@@ -4067,16 +4113,15 @@ impl Shell {
                             &self
                                 .workspace
                                 .session_for_pane(self.workspace.tab_focus(**id)),
-                        ) && self
-                            .session_metadata(
-                                self.workspace
-                                    .session_for_pane(self.workspace.tab_focus(**id)),
-                                cx,
+                        ) && {
+                            let session = self
+                                .workspace
+                                .session_for_pane(self.workspace.tab_focus(**id));
+                            self.project_matches_session(
+                                &path,
+                                &self.session_metadata(session, cx).summary.cwd,
                             )
-                            .summary
-                            .cwd
-                            == path
-                            && self.in_worktree_scope(self.workspace.tab_focus(**id), cx)
+                        } && self.in_worktree_scope(self.workspace.tab_focus(**id), cx)
                     })
                     .map(|tab| self.workspace.tab_focus(*tab))
             });
@@ -4093,11 +4138,28 @@ impl Shell {
         if self.workspace.active.is_some() || self.mono_active(cx) {
             return;
         }
+        let project = self.workspace.project.clone();
+        let target_cwd = monocode_core::store::project_cwd_for_host(
+            &project,
+            &self.project_links,
+            self.workspace
+                .project_hosts
+                .get(&project)
+                .filter(|environment| {
+                    self.remote_machines
+                        .iter()
+                        .any(|machine| machine.environment_id.as_str() == environment.as_str())
+                })
+                .map(String::as_str),
+        )
+        .unwrap_or_else(|| project.clone());
+        let remote_target = target_cwd.starts_with("remote://");
         if let Some(id) = self.order.iter().copied().find(|id| {
             let s = self.session_metadata(*id, cx);
-            s.summary.cwd == self.workspace.project
-                && monocode_core::files::path_key(self.session_working_copy(*id, cx))
-                    == monocode_core::files::path_key(self.working_copy())
+            s.summary.cwd == target_cwd
+                && (remote_target
+                    || monocode_core::files::path_key(self.session_working_copy(*id, cx))
+                        == monocode_core::files::path_key(self.working_copy()))
                 && !s.summary.archived
                 && !s.summary.has_messages
                 && !s.busy
@@ -4131,6 +4193,7 @@ impl Shell {
                     let path = path.to_string_lossy().into_owned();
                     let _ = this.update_in(cx, |this, window, cx| {
                         this.workspace.add_project(&path);
+                        this.refresh_project_links(cx);
                         this.select_project(path, window, cx);
                     });
                 }
@@ -4163,8 +4226,30 @@ impl Shell {
     ) {
         let store = self.store.clone();
         let cwd = self.workspace.project.clone();
-        let focus = self.worktree_focus.get(&cwd).cloned();
-        let blank_key = format!("{cwd}\0{}", focus.as_ref().map_or("", |f| f.path.as_str()));
+        let selected_host = self
+            .workspace
+            .project_hosts
+            .get(&cwd)
+            .filter(|environment| {
+                self.remote_machines
+                    .iter()
+                    .any(|machine| machine.environment_id.as_str() == environment.as_str())
+            })
+            .cloned();
+        let target_cwd = monocode_core::store::project_cwd_for_host(
+            &cwd,
+            &self.project_links,
+            selected_host.as_deref(),
+        )
+        .unwrap_or_else(|| cwd.clone());
+        let focus = (!target_cwd.starts_with("remote://"))
+            .then(|| self.worktree_focus.get(&cwd).cloned())
+            .flatten();
+        let blank_key = format!(
+            "{cwd}\0{}\0{}",
+            focus.as_ref().map_or("", |f| f.path.as_str()),
+            selected_host.as_deref().unwrap_or("local")
+        );
         if only_if_empty && !self.pending_project_blanks.insert(blank_key.clone()) {
             return;
         }
@@ -4184,10 +4269,11 @@ impl Shell {
         let effort = crate::conversation::preferred_effort(kind.id(), cx);
         let work = cx.background_executor().spawn({
             let cwd = cwd.clone();
+            let target_cwd = target_cwd.clone();
             let worktree_cwd = focus.as_ref().map(|f| f.path.clone());
             async move {
                 let store = locked(&store)?;
-                let summary = store.create(kind.id(), &cwd)?;
+                let summary = store.create(kind.id(), &target_cwd)?;
                 let mut settings = session_loading::new_session_settings(
                     store
                         .desktop_preferences()
@@ -5129,8 +5215,9 @@ impl Shell {
                         (monos, manager.active.clone())
                     })
                     .unwrap_or_default();
+                let projects = self.visible_project_paths();
                 let picker = cx.new(|cx| {
-                    ProjectPicker::new(&self.workspace.projects, &self.workspace.project, cx)
+                    ProjectPicker::new(&projects, &self.workspace.project, cx)
                         .appearance(self.workspace.project_appearance.clone())
                         .allow_remote()
                         .monos(monos, active, cx)
@@ -5170,8 +5257,9 @@ impl Shell {
             }
             // SidebarWorktreeSwitcher's menu under the project header.
             MenuTarget::Header => {
+                let projects = self.visible_project_paths();
                 let picker = cx.new(|cx| {
-                    ProjectPicker::new(&self.workspace.projects, &self.workspace.project, cx)
+                    ProjectPicker::new(&projects, &self.workspace.project, cx)
                         .appearance(self.workspace.project_appearance.clone())
                         .allow_remote()
                 });
@@ -5644,6 +5732,7 @@ impl Shell {
             || mode.is_some()
             || self.automation_state.session_automations.contains_key(&id);
         let session = self.session_metadata(id, cx);
+        let host_label = self.session_machine_tag(&session.summary.cwd);
         let active = self.selected_sessions.contains(&id)
             || (self.workspace.active == Some(id)
                 && !self.mono_active(cx)
@@ -5795,6 +5884,18 @@ impl Shell {
                 .gap(px(if nested { 6. } else { 8. }))
                 .child(mark)
                 .child(title)
+                .when_some(host_label.clone(), |d, label| {
+                    d.child(
+                        div()
+                            .flex_shrink_0()
+                            .rounded(px(3.))
+                            .px_1()
+                            .text_size(px(9.))
+                            .text_color(content(0.5))
+                            .bg(content(0.06))
+                            .child(label),
+                    )
+                })
                 .when(has_badges, |d| d.child(badges))
                 .child(suffix)
                 .into_any_element()
@@ -5815,6 +5916,18 @@ impl Shell {
                             d.child(icon("pin", 12.).text_color(content(0.45)))
                         })
                         .child(title)
+                        .when_some(host_label.clone(), |d, label| {
+                            d.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .rounded(px(3.))
+                                    .px_1()
+                                    .text_size(px(9.))
+                                    .text_color(content(0.5))
+                                    .bg(content(0.06))
+                                    .child(label),
+                            )
+                        })
                         .child(suffix),
                 )
                 .child(
@@ -6098,7 +6211,7 @@ impl Shell {
                 .monos
                 .as_ref()
                 .is_some_and(|m| m.read(cx).hidden_session(id))
-                && s.summary.cwd == self.workspace.project
+                && self.project_matches_session(&self.workspace.project, &s.summary.cwd)
                 && s.summary.has_messages
                 && !self.orchestration_worker(id)
                 && self.in_sidebar_worktree_scope(id, cx)
@@ -6174,7 +6287,7 @@ impl Shell {
         if self.menu.is_some() {
             return;
         }
-        let projects = self.workspace.projects.clone();
+        let projects = self.visible_project_paths();
         if let Some(next) = adjacent(&projects, Some(&self.workspace.project), step)
             && next != self.workspace.project
         {
@@ -6451,13 +6564,12 @@ impl Shell {
 
     fn project_spaces(&mut self, cx: &mut Context<Self>) -> AnyElement {
         // Sidebar.tsx's ProjectSpacesBar: five equal spaces, paged by chevrons.
-        let shown = self.workspace.projects.len().min(5);
-        let last = self.workspace.projects.len().saturating_sub(shown);
+        let visible_projects = self.visible_project_paths();
+        let shown = visible_projects.len().min(5);
+        let last = visible_projects.len().saturating_sub(shown);
         self.spaces_start = self.spaces_start.min(last);
         let first = self.spaces_start;
-        let projects: Vec<_> = self
-            .workspace
-            .projects
+        let projects: Vec<_> = visible_projects
             .iter()
             .enumerate()
             .skip(first)

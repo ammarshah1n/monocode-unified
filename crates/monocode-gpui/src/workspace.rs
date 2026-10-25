@@ -86,6 +86,8 @@ pub(crate) struct Workspace {
     pub project: String,
     /// Last focused open session in each project, independent of tab order.
     pub project_focus: HashMap<String, i64>,
+    /// Selected host for the next new session in each local project; absent means This Mac.
+    pub project_hosts: HashMap<String, String>,
     pub recent_files: HashMap<String, Vec<String>>,
     pub collapsed: HashSet<String>,
     pub sidebar_visible: bool,
@@ -296,6 +298,7 @@ impl Default for Workspace {
             archived_projects: Vec::new(),
             project: String::new(),
             project_focus: HashMap::new(),
+            project_hosts: HashMap::new(),
             recent_files: HashMap::new(),
             collapsed: HashSet::new(),
             sidebar_visible: true,

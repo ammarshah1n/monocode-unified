@@ -300,6 +300,7 @@ impl Shell {
             _ => None,
         };
         let session = self.session_metadata(id, cx);
+        let host_label = self.session_machine_tag(&session.summary.cwd);
         let selected = self.selected_sessions.contains(&id);
         let active =
             self.workspace.active == Some(id) && !self.mono_active(cx) && !self.app_view_open();
@@ -419,6 +420,18 @@ impl Shell {
                         d.child(icon("pin", 12.).text_color(content(0.45)))
                     })
                     .child(title)
+                    .when_some(host_label, |d, label| {
+                        d.child(
+                            div()
+                                .flex_shrink_0()
+                                .rounded(px(3.))
+                                .px_1()
+                                .text_size(px(9.))
+                                .text_color(content(0.5))
+                                .bg(content(0.06))
+                                .child(label),
+                        )
+                    })
                     .when(!header, |d| {
                         d.child(
                             div()
