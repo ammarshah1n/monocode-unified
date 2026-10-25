@@ -5,11 +5,14 @@ import {
   useOffline,
 } from "@/features/connection/ConnectionNotice";
 import { hasNativeTranscript } from "@/features/connection/nativeLink";
+import { useConnection } from "@/features/connection/ConnectionProvider";
+import { ProjectHostChip } from "@/features/connection/HostPicker";
+import { chooseProjectHost, projectFolderKey } from "@/features/connection/hosts";
 import { useProjectChanges } from "@/features/connection/useProjectChanges";
 import { useProjectWorktrees } from "@/features/connection/useProjectWorktrees";
 import type { Project, SessionSummary } from "@/features/workspace/types";
 import { use, useCallback, useEffect, useState, type ReactNode } from "react";
-import { Platform, Pressable, StyleSheet } from "react-native";
+import { Alert, Platform, Pressable, StyleSheet } from "react-native";
 import Animated, {
   Easing,
   useAnimatedStyle,
@@ -84,19 +87,43 @@ import { usePushedIn, usePushStarted } from "@/ui/usePushedIn";
  * the stack's native header (see the session route).
  */
 export function ProjectScreen({
-  project,
+  project: mergedProject,
   sessionId,
 }: {
   project: Project;
   sessionId: string | undefined;
 }) {
   const { startSession, sendMessage, stop } = useWorkspace();
+  const connection = useConnection();
+  const localProject = mergedProject.hosts?.find((host) =>
+    host.fingerprint === connection.pairing?.desktop.fingerprint,
+  )?.project;
+  const project = localProject
+    ? { ...mergedProject, ...localProject, name: mergedProject.name, hosts: mergedProject.hosts }
+    : mergedProject;
   const [openAfterStarting] = useOpenSessionAfterStarting();
   const colors = useColors();
   const blurTarget = use(GlassBlurTarget);
   // What it runs with, as the model picker, a route over it, sets it.
   const { session, chosen, startAccess, accounts } = useSessionChoice(project, sessionId);
   useForgetChoiceOnLeave(project.id, sessionId);
+  const hostForProject = chooseProjectHost(
+    project,
+    connection.lastUsedHostByProject[projectFolderKey(project)],
+  );
+  const targetHost = sessionId
+    ? session?.hostFingerprint ?? project.hosts?.find((host) => host.project.id === project.id)?.fingerprint
+    : hostForProject?.fingerprint;
+  const activeFingerprint = connection.pairing?.desktop.fingerprint;
+  const hostWorking = connection.working;
+  const switchHost = connection.switchHost;
+  useEffect(() => {
+    if (!targetHost || targetHost === activeFingerprint || hostWorking)
+      return;
+    void switchHost(targetHost).catch((reason) =>
+      Alert.alert("Could not change hosts", String(reason)),
+    );
+  }, [targetHost, activeFingerprint, hostWorking, switchHost]);
   // Open, however it was reached, a session is off the finished deck, and
   // stays off it as it finishes in front of the user.
   useEffect(() => (sessionId ? markViewing(sessionId) : undefined), [sessionId]);
@@ -248,12 +275,20 @@ export function ProjectScreen({
     }
   };
 
-  function openSession(id: string) {
+  function openSession(id: string, projectId = project.id) {
     router.push({
       pathname: "/project/[projectId]/session/[sessionId]",
-      params: { projectId: project.id, sessionId: id },
+      params: { projectId, sessionId: id },
     });
   }
+  const openSessionSummary = (picked: SessionSummary) => {
+    const open = () => openSession(picked.id, picked.projectId);
+    if (picked.hostFingerprint && picked.hostFingerprint !== connection.pairing?.desktop.fingerprint) {
+      void connection.switchHost(picked.hostFingerprint).then(open).catch((reason) =>
+        Alert.alert("Could not open session", String(reason)),
+      );
+    } else open();
+  };
 
   const sessionNotice = useSessionErrorNotice(sessionId);
   const offline = useOffline();
@@ -361,6 +396,7 @@ export function ProjectScreen({
               },
             })
           }
+          hostSelector={sessionId ? undefined : <ProjectHostChip project={project} />}
           {...(sessionId
             ? {
                 busy: conversation.busy,
@@ -456,7 +492,7 @@ export function ProjectScreen({
                   project={project}
                   inView={focused && pages.view === "chat"}
                   swiping={swiping}
-                  onOpen={(session) => openSession(session.id)}
+                  onOpen={openSessionSummary}
                 />
               </Animated.View>
             }
@@ -467,7 +503,7 @@ export function ProjectScreen({
                 worktree={
                   workspace.mode === "existing" ? workspace.worktree : undefined
                 }
-                onOpen={(session) => openSession(session.id)}
+                onOpen={openSessionSummary}
               />
             }
           />
@@ -506,6 +542,7 @@ function ProjectEmptySession({
       accessory={
         <LiveSessions
           projectId={project.id}
+          projectHosts={project.hosts}
           onOpen={onOpen}
           inView={inView}
           swiping={swiping}

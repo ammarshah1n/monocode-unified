@@ -61,6 +61,9 @@ vi.mock("react-native-safe-area-context", () => ({
   useSafeAreaInsets: () => ({ top: 20, bottom: 0, left: 0, right: 0 }),
 }));
 vi.mock("@/ui/CircleButton", () => ({ CircleButton: () => null }));
+vi.mock("@/features/connection/HostPicker", () => ({
+  HostChip: () => <span>Active host</span>, HOST_CHIP_HEIGHT: 36,
+}));
 vi.mock("@/ui/GradualBlur", () => ({ GradualBlur: () => null }));
 vi.mock("@/ui/Icon", () => ({ Icon: () => null }));
 vi.mock("@/ui/LiquidView", async () => ({
@@ -146,10 +149,10 @@ describe("persistent session frame", () => {
       expect(layout.onBelowLayout).toBeDefined();
       act(() => layout.onBelowLayout!({ nativeEvent: { layout: { height: 38 } } }));
       expect(container.textContent).toContain("Workspace and changes");
-      expect(container.querySelector("output")?.textContent).toBe("156:128");
+      expect(container.querySelector("output")?.textContent).toBe("200:172");
       // Larger font metrics must also move both content insets down.
       act(() => layout.onBelowLayout!({ nativeEvent: { layout: { height: 50 } } }));
-      expect(container.querySelector("output")?.textContent).toBe("168:140");
+      expect(container.querySelector("output")?.textContent).toBe("212:184");
     } finally {
       act(() => root.unmount());
       layout.OS = "ios";
@@ -182,15 +185,15 @@ describe("persistent session frame", () => {
     try {
       render("Settings", false);
       expect(container.textContent).toContain("Settings");
-      expect(container.querySelector("output")?.textContent).toBe("114:12");
+      expect(container.querySelector("output")?.textContent).toBe("158:12");
       render("Project", true);
       expect(container.textContent).toContain("Project");
       expect(container.textContent).toContain("Composer");
-      expect(container.querySelector("output")?.textContent).toBe("114:28");
+      expect(container.querySelector("output")?.textContent).toBe("158:28");
       render("Settings", false);
       expect(container.textContent).toContain("Settings");
       expect(container.textContent).not.toContain("Composer");
-      expect(container.querySelector("output")?.textContent).toBe("114:12");
+      expect(container.querySelector("output")?.textContent).toBe("158:12");
       expect(renders).toBeLessThan(20);
     } finally {
       act(() => root.unmount());

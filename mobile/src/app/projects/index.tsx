@@ -7,6 +7,8 @@ import { SettingsPage, SettingsRow } from "@/features/settings/SettingsUI";
 import { pickProject } from "@/features/workspace/projectPick";
 import { projectForRoute } from "@/features/workspace/routing";
 import { useWorkspace } from "@/features/workspace/WorkspaceProvider";
+import { HostTags } from "@/features/connection/HostPicker";
+import { projectFolderKey } from "@/features/connection/hosts";
 import { Icon } from "@/ui/Icon";
 import { themedStyles, useColors } from "@/ui/theme";
 
@@ -32,7 +34,9 @@ export default function ProjectsScreen() {
     : projects;
   const pick = (id: string) => {
     if (switching) return;
-    if (id === selected?.id) return router.back();
+    const project = projects.find((entry) => entry.id === id);
+    if (project && selected && projectFolderKey(project) === projectFolderKey(selected))
+      return router.back();
     setSwitching(id);
     afterFrames(SPINNER_FRAMES, () => {
       // A project screen switches itself under the sheet; any other is
@@ -75,11 +79,15 @@ export default function ProjectsScreen() {
               }
               label={project.name}
               accessory={
-                switching === project.id ? (
-                  <ActivityIndicator size="small" color={colors.muted} />
-                ) : project.id === (switching ? null : selected?.id) ? (
-                  <Icon name="check" size={18} color={colors.accent} />
-                ) : null
+                <View style={styles.accessory}>
+                  <HostTags hosts={project.hosts ?? []} />
+                  {switching === project.id ? (
+                    <ActivityIndicator size="small" color={colors.muted} />
+                  ) : !switching && selected &&
+                      projectFolderKey(project) === projectFolderKey(selected) ? (
+                    <Icon name="check" size={18} color={colors.accent} />
+                  ) : null}
+                </View>
               }
               onPress={() => pick(project.id)}
             />
@@ -100,6 +108,7 @@ function afterFrames(frames: number, then: () => void) {
 }
 
 const useStyles = themedStyles((colors) => ({
+  accessory: { flexDirection: "row", alignItems: "center", gap: 6 },
   divider: {
     height: StyleSheet.hairlineWidth,
     marginLeft: 40,

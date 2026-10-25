@@ -33,9 +33,14 @@ vi.mock("expo-sqlite/kv-store", () => ({
 vi.mock("@/features/connection/ConnectionProvider", () => ({
   useConnection: () => ({
     pairing: link.pairing,
-    catalog: { projects: [{ id: "project" }], monos: [], sessions: [] },
+    hosts: [{ fingerprint: "desktop", name: "Desktop" }],
+    hostCatalogs: { desktop: { projects: [{ id: "project", name: "Project", path: "/project", machine: "", branch: "", color: "", additions: 0, deletions: 0 }], monos: [], sessions: [] } },
+    hostSelections: { desktop: { projectIds: ["project"], monoIds: [] } },
+    catalog: { projects: [{ id: "project", name: "Project", path: "/project", machine: "", branch: "", color: "", additions: 0, deletions: 0 }], monos: [], sessions: [] },
     selection: { projectIds: ["project"], monoIds: [] },
+    lastUsedHostByProject: {},
     command: link.command,
+    commandOnHost: vi.fn(),
     refresh: link.refresh,
   }),
 }));

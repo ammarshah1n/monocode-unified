@@ -12,7 +12,7 @@ import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSw
 import Animated, { FadeIn, FadeOut, LinearTransition } from "react-native-reanimated";
 
 import { FileSearchBar, SEARCH_BAR } from "@/features/files/FileSearchBar";
-import type { Harness, SessionSummary, Worktree } from "@/features/workspace/types";
+import type { Harness, ProjectHost, SessionSummary, Worktree } from "@/features/workspace/types";
 import { useWorkspace } from "@/features/workspace/WorkspaceProvider";
 import { GradualBlur } from "@/ui/GradualBlur";
 import { themedStyles, useColors } from "@/ui/theme";
@@ -40,11 +40,13 @@ import { useSessionPages, visibleSessions } from "./useSessionPages";
  */
 export function SessionsPage({
   projectId,
+  projectHosts,
   active,
   worktree,
   onOpen,
 }: {
   projectId: string;
+  projectHosts?: ProjectHost[];
   active: boolean;
   worktree?: Worktree;
   onOpen: (session: SessionSummary) => void;
@@ -58,7 +60,12 @@ export function SessionsPage({
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<SessionFilter>(NO_FILTER);
   const needle = query.trim().toLowerCase();
-  const recent = sessions.filter((session) => session.projectId === projectId);
+  const recent = sessions.filter((session) => projectHosts
+    ? projectHosts.some((host) =>
+        host.fingerprint === session.hostFingerprint && host.project.id === session.projectId,
+      )
+    : session.projectId === projectId,
+  );
   const pages = useSessionPages(projectId, needle, active);
   const listed = visibleSessions(pages, recent, needle, edited).filter((session) =>
     inWorktree(session, worktree),

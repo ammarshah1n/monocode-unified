@@ -36,6 +36,7 @@ import Animated, {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { CircleButton } from "@/ui/CircleButton";
+import { HostChip, HOST_CHIP_HEIGHT } from "@/features/connection/HostPicker";
 import { GradualBlur } from "@/ui/GradualBlur";
 import { Icon, type IconName } from "@/ui/Icon";
 import {
@@ -438,7 +439,9 @@ export function SessionFrame({
     ],
   }));
 
-  const headerTop = insets.top + 6;
+  const hostTop = native ? nativeHeaderHeight : insets.top + 6;
+  const hostHeight = HOST_CHIP_HEIGHT + 8;
+  const headerTop = insets.top + 6 + hostHeight;
   // The outer frame contains the native navigator and its header surfaces.
   // Recording that whole tree can include a blur sampling its own RenderNode.
   // Only the per-screen frame may record content for its sibling surfaces.
@@ -456,11 +459,11 @@ export function SessionFrame({
   const [belowHeight, setBelowHeight] = useState(BELOW_HEIGHT);
   const hasBelow = !!chrome?.below;
   // Where the frame above the content ends: the header, and the line under it if any.
-  const belowTop = (native ? nativeHeaderHeight : headerBottom) + BELOW_GAP;
+  const belowTop = (native ? nativeHeaderHeight + hostHeight : headerBottom) + BELOW_GAP;
   const frameBottom = hasBelow
     ? belowTop + (measureBelow ? belowHeight : BELOW_HEIGHT)
     : native
-      ? nativeHeaderHeight
+      ? nativeHeaderHeight + hostHeight
       : headerBottom;
   const composerBottom = Math.max(insets.bottom, 12);
   const keyboardOffset = composerBottom - KEYBOARD_GAP;
@@ -545,6 +548,14 @@ export function SessionFrame({
                 height={frameBottom + TOP_FADE}
                 color={colors.background}
               />
+            )}
+            {covered ? null : (
+              <View style={[
+                { position: "absolute", top: hostTop, left: 0, right: 0 },
+                native && nativeHeaderHeight === 0 && styles.unplaced,
+              ]}>
+                <HostChip />
+              </View>
             )}
             {/* Under a native header the line has no push of its own:
                 the screen it belongs to slides in with it. Hidden until the

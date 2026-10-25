@@ -78,6 +78,7 @@ export function Composer({
   onStop,
   onModelPress,
   workspace,
+  hostSelector,
   notice,
 }: {
   /** Where this runs: the project, or the mono. */
@@ -94,6 +95,8 @@ export function Composer({
   onModelPress?: () => void;
   /** Where it works, shown in place of the context and branch. */
   workspace?: ReactNode;
+  /** Project-specific machine choice for a new session. */
+  hostSelector?: ReactNode;
   /** The session's latest error, in place of the field until tapped away. */
   notice?: { text: string; dismiss: () => void } | null;
 }) {
@@ -363,7 +366,7 @@ export function Composer({
           accessibilityLabel={`Model: ${model || "Desktop default"}${effort ? `, ${effort} effort` : ""}`}
           accessibilityHint="Choose the model, account, effort and permissions"
           onPress={onModelPress}
-          style={({ pressed }) => [styles.modelPill, pressed && styles.pressed]}
+          style={({ pressed }) => [styles.modelPill, hostSelector ? styles.modelPillFlexible : undefined, pressed && styles.pressed]}
         >
           {harness ? <ProviderLogo harness={harness} size={16} color={colors.content} /> : null}
           <Text style={styles.model} numberOfLines={1}>
@@ -372,6 +375,7 @@ export function Composer({
           </Text>
           <Icon name="chevronDown" size={14} color={colors.muted} />
         </Pressable>
+        {hostSelector}
       </Animated.View>
 
       <Animated.View
@@ -647,6 +651,7 @@ const useStyles = themedStyles((colors) => ({
     borderRadius: BUTTON / 2,
     backgroundColor: colors.fill,
   },
+  modelPillFlexible: { flex: 1 },
   model: {
     flexShrink: 1,
     color: colors.content,

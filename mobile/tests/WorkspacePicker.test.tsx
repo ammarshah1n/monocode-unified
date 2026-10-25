@@ -19,6 +19,7 @@ vi.mock("react-native", () => ({
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 24, bottom: 16 }) }));
 vi.mock("@/features/connection/ConnectionProvider", () => ({
   useConnection: () => ({ connected: true, selection: { projectIds: [], monoIds: [] },
+    hosts: [], hostCatalogs: {}, hostSelections: {},
     catalog: { projects: [], monos: [] }, select: vi.fn(), refresh: vi.fn() }),
 }));
 vi.mock("@/features/connection/ConnectScreen", () => ({ connectionStyleSheet: () => ({}) }));

@@ -25,7 +25,8 @@ import {
 import { selectedWorkspace } from "@/features/connection/selection";
 import type { ModelCatalog, ModelChoice } from "@/features/models/types";
 import { toWire, type Attachment } from "@/features/sessions/attachments";
-import type { Message, Mono, Project, SessionSummary, Turn, TurnItem } from "./types";
+import type { Message, Mono, Project, ProjectHost, SessionSummary, Turn, TurnItem } from "./types";
+import { mergeProjectsByFolder, projectFolderKey } from "@/features/connection/hosts";
 import { applyFrames, type WatchFrame } from "./watchUpdates";
 /**
  * The workspace: what the desktop has and what can be done with it. Changes
@@ -48,7 +49,7 @@ type Workspace = {
     attachments?: Attachment[],
   ) => Promise<string>;
   sendMessage: (conversationId: string, text: string, attachments?: Attachment[]) => Promise<void>;
-  stop: (conversationId: string) => Promise<void>;
+  stop: (conversationId: string, hostFingerprint?: string) => Promise<void>;
   /** A page of a project's sessions, newest first, beyond the recent ones the poll carries. */
   listSessions: (
     projectId: string,
@@ -67,9 +68,9 @@ type Workspace = {
   renameSession: (session: SessionSummary, title: string) => Promise<void>;
   /** Deletes a session on the desktop. It leaves every list at once, and comes
    *  back if the desktop refuses. */
-  deleteSession: (conversationId: string) => Promise<void>;
+  deleteSession: (conversationId: string, hostFingerprint?: string) => Promise<void>;
   /** Archives a session on the desktop; like a delete, it leaves every list at once. */
-  archiveSession: (conversationId: string) => Promise<void>;
+  archiveSession: (conversationId: string, hostFingerprint?: string) => Promise<void>;
   /** A session as the phone last changed it, or null once deleted here. */
   edited: (session: SessionSummary) => SessionSummary | null;
   nativeTranscriptStatus: (id: string, status: NativeTranscriptStatus) => void;
@@ -157,6 +158,40 @@ async function writeCachedTurns(desktop: string, id: string, turns: Turn[]) {
 }
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const connection = useConnection();
+  const commandOnHost = connection.commandOnHost;
+  const hostWorkspaces = useMemo(() => connection.hosts.map((host) => {
+    const catalog = connection.hostCatalogs[host.fingerprint] ?? {
+      projects: [], monos: [], sessions: [],
+    };
+    return {
+      host,
+      catalog,
+      selected: selectedWorkspace(catalog, connection.hostSelections[host.fingerprint] ?? null),
+    };
+  }), [connection.hosts, connection.hostCatalogs, connection.hostSelections]);
+  const mergedProjects = useMemo(() => mergeProjectsByFolder(hostWorkspaces.map(({ host, catalog }) => ({
+    fingerprint: host.fingerprint,
+    name: host.name,
+    projects: catalog.projects,
+  }))), [hostWorkspaces]);
+  const selectedProjectFolders = useMemo(() => new Set(hostWorkspaces.flatMap(({ selected }) =>
+    selected.projects.map(projectFolderKey),
+  )), [hostWorkspaces]);
+  const projects = useMemo(
+    () => mergedProjects.filter((project) => selectedProjectFolders.has(projectFolderKey(project))),
+    [mergedProjects, selectedProjectFolders],
+  );
+  const sessionsFromHosts = useMemo(() => hostWorkspaces.flatMap(({ host, selected }) =>
+    selected.sessions.map((session) => ({
+      ...session,
+      hostFingerprint: host.fingerprint,
+      hostName: host.name,
+    })),
+  ), [hostWorkspaces]);
+  const activeWorkspace = hostWorkspaces.find(({ host }) =>
+    host.fingerprint === connection.pairing?.desktop.fingerprint,
+  )?.selected;
+  const monos = useMemo(() => activeWorkspace?.monos ?? [], [activeWorkspace]);
   const current = useRef(connection);
   useLayoutEffect(() => {
     current.current = connection;
@@ -331,8 +366,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, [watching, desktop, read]);
   const mutationIds = useRef(new Map<string, string>());
   const { command, refresh } = connection;
-  const mutate = useCallback(async <T,>(method: string, params: object): Promise<T> => {
-    const signature = JSON.stringify([method, params]);
+  const mutate = useCallback(async <T,>(
+    method: string,
+    params: object,
+    hostFingerprint?: string,
+  ): Promise<T> => {
+    const signature = JSON.stringify([hostFingerprint, method, params]);
     const pending = mutationIds.current;
     let id = pending.get(signature);
     if (!id) {
@@ -340,7 +379,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       pending.set(signature, id);
     }
     try {
-      const result = await command<T>(method, params, id);
+      const result = await (hostFingerprint
+        ? current.current.commandOnHost<T>(hostFingerprint, method, params, id)
+        : command<T>(method, params, id));
       pending.delete(signature);
       return result;
     } catch (reason) {
@@ -459,25 +500,31 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [mutate],
   );
   const stop = useCallback(
-    async (conversationId: string) => {
-      await mutate("session.cancel", { conversationId });
-      if (!hasNativeTranscript) await read(conversationId);
+    async (conversationId: string, hostFingerprint?: string) => {
+      await mutate("session.cancel", { conversationId }, hostFingerprint);
+      if (!hasNativeTranscript &&
+          (!hostFingerprint || hostFingerprint === current.current.pairing?.desktop.fingerprint))
+        await read(conversationId);
     },
     [mutate, read],
   );
   const renameSession = useCallback(
     async (session: SessionSummary, title: string) => {
-      await mutate("session.rename", { conversationId: session.id, title });
+      await mutate("session.rename", { conversationId: session.id, title }, session.hostFingerprint);
       setRenamed((previous) => ({ ...previous, [session.id]: { title, from: session.title } }));
       void refresh();
     },
     [mutate, refresh],
   );
   const removeSession = useCallback(
-    async (method: "session.delete" | "session.archive", conversationId: string) => {
+    async (
+      method: "session.delete" | "session.archive",
+      conversationId: string,
+      hostFingerprint?: string,
+    ) => {
       setDeleted((previous) => new Set(previous).add(conversationId));
       try {
-        await mutate(method, { conversationId });
+        await mutate(method, { conversationId }, hostFingerprint);
       } catch (reason) {
         setDeleted((previous) => {
           const next = new Set(previous);
@@ -491,33 +538,67 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [mutate, refresh],
   );
   const deleteSession = useCallback(
-    (conversationId: string) => removeSession("session.delete", conversationId),
+    (conversationId: string, hostFingerprint?: string) =>
+      removeSession("session.delete", conversationId, hostFingerprint),
     [removeSession],
   );
   const archiveSession = useCallback(
-    (conversationId: string) => removeSession("session.archive", conversationId),
+    (conversationId: string, hostFingerprint?: string) =>
+      removeSession("session.archive", conversationId, hostFingerprint),
     [removeSession],
   );
-  const listSessions = useCallback(
-    (projectId: string, query: string, offset: number, filters?: SessionListFilters) =>
-      command<SessionPage>("sessions.list", {
-        projectId,
-        query,
-        offset,
-        limit: SESSION_PAGE,
-        ...filters,
-      }),
-    [command],
-  );
-  const { catalog, selection } = connection;
+  const listSessions = useCallback(async (
+    projectId: string,
+    query: string,
+    offset: number,
+    filters?: SessionListFilters,
+  ): Promise<SessionPage> => {
+    const project = mergedProjects.find((entry) =>
+      entry.id === projectId || entry.hosts?.some((host) => host.project.id === projectId),
+    );
+    const members: ProjectHost[] = project?.hosts ?? [];
+    const target = offset + SESSION_PAGE;
+    const pages = await Promise.all(members.map(async (host) => {
+      const sessions: SessionSummary[] = [];
+      let hasMore = true;
+      while (sessions.length < target && hasMore) {
+        const limit = Math.min(100, target - sessions.length);
+        try {
+          const page = await commandOnHost<SessionPage>(host.fingerprint, "sessions.list", {
+            projectId: host.project.id,
+            query,
+            offset: sessions.length,
+            limit,
+            ...filters,
+          });
+          sessions.push(...page.sessions.map((session) => ({
+            ...session,
+            hostFingerprint: host.fingerprint,
+            hostName: host.name,
+          })));
+          hasMore = page.hasMore;
+          if (!page.sessions.length) hasMore = false;
+        } catch {
+          hasMore = false;
+        }
+      }
+      return { sessions, hasMore };
+    }));
+    const combined = pages.flatMap((page) => page.sessions)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    return {
+      sessions: combined.slice(offset, offset + SESSION_PAGE),
+      hasMore: combined.length > offset + SESSION_PAGE || pages.some((page) => page.hasMore),
+    };
+  }, [commandOnHost, mergedProjects]);
   // The sessions the workspace already lists, read as a session is opened.
   const listedRef = useRef<ReadonlySet<string>>(new Set());
   useLayoutEffect(() => {
     listedRef.current = new Set([
-      ...selectedWorkspace(catalog, selection).sessions.map((session) => session.id),
+      ...sessionsFromHosts.map((session) => session.id),
       ...Object.keys(remembered),
     ]);
-  }, [catalog, selection, remembered]);
+  }, [sessionsFromHosts, remembered]);
   // Only a session the workspace doesn't list yet (one paged in) changes it:
   // opening a listed one must not re-render every screen as it is pushed.
   const rememberSession = useCallback((session: SessionSummary) => {
@@ -545,8 +626,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
   }, []);
   const workspace = useMemo<Workspace>(() => {
-    const selected = selectedWorkspace(catalog, selection);
-    const known = new Set(selected.sessions.map((session) => session.id));
+    const known = new Set(sessionsFromHosts.map((session) => session.id));
     const edited = (session: SessionSummary) =>
       deleted.has(session.id)
         ? null
@@ -554,10 +634,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           ? { ...session, title: renamed[session.id].title }
           : session;
     return {
-      projects: selected.projects,
-      monos: selected.monos,
+      projects,
+      monos,
       sessions: [
-        ...selected.sessions,
+        ...sessionsFromHosts,
         ...Object.values(remembered).filter((session) => !known.has(session.id)),
       ].flatMap((session) => edited(session) ?? []),
       watch,
@@ -578,8 +658,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, [
     renamed,
     deleted,
-    catalog,
-    selection,
+    projects,
+    monos,
+    sessionsFromHosts,
     remembered,
     startSession,
     sendMessage,

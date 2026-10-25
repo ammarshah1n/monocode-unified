@@ -37,7 +37,7 @@ const EASE = Easing.out(Easing.cubic);
 // the pitch, to the left, above the ways to pair.
 // Mascots rain down over it all, landing on the words and buttons, and tumble
 // about as the phone tilts. In the light or dark palette, as the app is.
-export function ConnectScreen() {
+export function ConnectScreen({ onCancel }: { onCancel?: () => void }) {
   const colors = useColors();
   const connectionStyles = useConnectionStyles();
   const styles = useStyles();
@@ -86,6 +86,9 @@ export function ConnectScreen() {
             accessibilityIgnoresInvertColors
           />
           <Text style={styles.wordmark}>Monocode</Text>
+          {onCancel && connection.pairing ? (
+            <Text style={styles.subtitle}>Active host: {connection.pairing.desktop.name}</Text>
+          ) : null}
         </Animated.View>
         <Animated.View
           style={styles.intro}
@@ -117,6 +120,11 @@ export function ConnectScreen() {
             <ActivityIndicator color={colors.content} style={styles.working} />
           ) : null}
           {error ? <Text style={styles.error}>{error}</Text> : null}
+          {onCancel ? (
+            <Pressable accessibilityRole="button" disabled={connection.working} onPress={onCancel}>
+              <Text style={connectionStyles.secondary}>Cancel adding host</Text>
+            </Pressable>
+          ) : null}
           <View onLayout={colliders.layout("primary")}>
             {/* Glass in the theme's inverse: white on dark, black on light. */}
             <LiquidView

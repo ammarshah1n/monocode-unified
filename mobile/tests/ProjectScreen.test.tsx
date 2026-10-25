@@ -111,6 +111,15 @@ vi.mock("@/features/connection/ConnectionNotice", () => ({
   ConnectionNotice: () => null,
   ReconnectingStatus: () => null,
 }));
+vi.mock("@/features/connection/ConnectionProvider", () => ({
+  useConnection: () => ({
+    pairing: { desktop: { fingerprint: "desktop" } },
+    lastUsedHostByProject: {},
+    working: false,
+    switchHost: vi.fn(),
+  }),
+}));
+vi.mock("@/features/connection/HostPicker", () => ({ ProjectHostChip: () => null }));
 vi.mock("@/features/connection/nativeLink", () => ({
   hasNativeTranscript: false,
 }));

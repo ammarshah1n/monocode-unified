@@ -4,7 +4,9 @@ import {
   Stack,
   ThemeProvider,
   type NativeStackNavigationOptions,
+  usePathname,
 } from "expo-router";
+import { useState } from "react";
 import { StatusBar } from "expo-status-bar";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
@@ -122,9 +124,7 @@ export default function RootLayout() {
           <SafeAreaProvider>
             <ConnectionProvider>
               <StatusBar style={scheme === "dark" ? "light" : "dark"} />
-              <WorkspaceGate>
-                <LinkedWorkspace />
-              </WorkspaceGate>
+              <LinkedWorkspace />
             </ConnectionProvider>
           </SafeAreaProvider>
         </ThemeProvider>
@@ -136,35 +136,49 @@ export default function RootLayout() {
 function LinkedWorkspace() {
   const connection = useConnection();
   const { screens } = useNavigationLook();
+  const fingerprint = connection.pairing?.desktop.fingerprint;
+  const pathname = usePathname();
+  const [routedHost, setRoutedHost] = useState<string>();
+  // Drop the old host's route/history before mounting any of the new host's
+  // project or session screens, even when IDs happen to match across hosts.
+  const ready = !connection.restoring && !connection.addingHost && connection.selection !== null;
+  if (ready && pathname === "/" && routedHost !== fingerprint)
+    setRoutedHost(fingerprint);
   return (
-    <WorkspaceProvider key={connection.pairing?.desktop.deviceId}>
-      <SessionNotifications />
-      <SessionActivity />
-      <ScenePagerHost>
-        <SessionFrame>
-          {/* A native stack: sessions push over their project, and the
-              code screens, Changes, settings, the model picker and the project
-              picker present
-              over the rest as native modals; everything else swaps in place,
-              as a plain slot did. */}
-          <Stack screenOptions={{ headerShown: false, animation: "none" }}>
-            <Stack.Screen name="file" options={screens.code} />
-            <Stack.Screen name="diff" options={screens.code} />
-            <Stack.Screen
-              name="project/[projectId]/index"
-              options={screens.nativeHeader}
-            />
-            <Stack.Screen
-              name="project/[projectId]/session/[sessionId]"
-              options={screens.session}
-            />
-            <Stack.Screen name="projects" options={screens.modal} />
-            <Stack.Screen name="settings" options={screens.modal} />
-            <Stack.Screen name="models" options={screens.modal} />
-            <Stack.Screen name="changes" options={screens.changes} />
-          </Stack>
-        </SessionFrame>
-      </ScenePagerHost>
-    </WorkspaceProvider>
+    <WorkspaceGate>
+      <WorkspaceProvider key={fingerprint}>
+        <SessionNotifications />
+        <SessionActivity />
+        <ScenePagerHost>
+          <SessionFrame>
+            {/* A native stack: sessions push over their project, and the
+                code screens, Changes, settings, the model picker and the project
+                picker present
+                over the rest as native modals; everything else swaps in place,
+                as a plain slot did. */}
+            <Stack screenOptions={{ headerShown: false, animation: "none" }}>
+              <Stack.Screen name="index" />
+              <Stack.Protected guard={routedHost === fingerprint}>
+                <Stack.Screen name="mono/[monoId]" />
+                <Stack.Screen name="file" options={screens.code} />
+                <Stack.Screen name="diff" options={screens.code} />
+                <Stack.Screen
+                  name="project/[projectId]/index"
+                  options={screens.nativeHeader}
+                />
+                <Stack.Screen
+                  name="project/[projectId]/session/[sessionId]"
+                  options={screens.session}
+                />
+                <Stack.Screen name="projects" options={screens.modal} />
+                <Stack.Screen name="settings" options={screens.modal} />
+                <Stack.Screen name="models" options={screens.modal} />
+                <Stack.Screen name="changes" options={screens.changes} />
+              </Stack.Protected>
+            </Stack>
+          </SessionFrame>
+        </ScenePagerHost>
+      </WorkspaceProvider>
+    </WorkspaceGate>
   );
 }

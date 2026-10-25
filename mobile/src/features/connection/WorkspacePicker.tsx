@@ -2,6 +2,7 @@ import * as Haptics from "expo-haptics";
 import {
   Children,
   Fragment,
+  useMemo,
   useState,
   type ReactElement,
   type ReactNode,
@@ -24,6 +25,8 @@ import { Icon } from "@/ui/Icon";
 import { LiquidView } from "@/ui/LiquidView";
 import { withAlpha, radii, themedStyles, useColors } from "@/ui/theme";
 import { useConnection } from "./ConnectionProvider";
+import { HostChip, HostTags } from "./HostPicker";
+import { mergeProjectsByFolder } from "./hosts";
 import { connectionStyleSheet } from "./ConnectScreen";
 import { MONOS_ENABLED, type MobileSelection } from "./selection";
 
@@ -49,10 +52,19 @@ export function WorkspacePicker({
   const styles = useStyles();
   const connection = useConnection();
   const insets = useSafeAreaInsets();
+  const projects = useMemo(() => mergeProjectsByFolder(connection.hosts.map((host) => ({
+    fingerprint: host.fingerprint,
+    name: host.name,
+    projects: connection.hostCatalogs[host.fingerprint]?.projects ?? [],
+  }))), [connection.hosts, connection.hostCatalogs]);
+  const selectedProjects = projects.filter((project) => project.hosts?.some((host) =>
+    connection.hostSelections[host.fingerprint]?.projectIds.includes(host.project.id),
+  ));
   const androidHeader = editing && Platform.OS === "android";
-  const [draft, setDraft] = useState<MobileSelection>(
-    () => connection.selection ?? { projectIds: [], monoIds: [] },
-  );
+  const [draft, setDraft] = useState<MobileSelection>(() => ({
+    projectIds: selectedProjects.map((project) => project.id),
+    monoIds: connection.selection?.monoIds ?? [],
+  }));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [footer, setFooter] = useState(120);
@@ -80,12 +92,10 @@ export function WorkspacePicker({
     }
   };
   const count =
-    draft.projectIds.filter((id) =>
-      connection.catalog.projects.some((project) => project.id === id),
-    ).length +
+    draft.projectIds.filter((id) => projects.some((project) => project.id === id)).length +
     draft.monoIds.filter((id) => monos.some((mono) => mono.id === id)).length;
   const disabled = saving || (!editing && !connection.connected);
-  const empty = !connection.catalog.projects.length && !monos.length;
+  const empty = !projects.length && !monos.length;
   const content = (
     <>
       <ScrollView
@@ -133,15 +143,16 @@ export function WorkspacePicker({
             ))}
           </Section>
         ) : null}
-        {connection.catalog.projects.length ? (
+        {projects.length ? (
           <Section title="Projects" editing={editing}>
-            {connection.catalog.projects.map((project) => (
+            {projects.map((project) => (
               <PickCard
                 key={project.id}
                 editing={editing}
                 label={project.name}
                 selected={draft.projectIds.includes(project.id)}
                 onPress={() => toggle("projectIds", project.id)}
+                hosts={project.hosts}
                 icon={
                   <ProjectMascot
                     project={project.path}
@@ -205,8 +216,8 @@ export function WorkspacePicker({
           </Pressable>
         ) : null}
         {editing ? null : (
-          <Pressable hitSlop={8} onPress={() => void connection.disconnect()}>
-            <Text style={styles.link}>Connect another desktop</Text>
+          <Pressable hitSlop={8} onPress={connection.addHost}>
+            <Text style={styles.link}>Add another host</Text>
           </Pressable>
         )}
       </View>
@@ -215,7 +226,12 @@ export function WorkspacePicker({
   // Keep the ScrollView at the screen root, like SettingsPage. UIKit then
   // tracks it for transparent navigation and the custom fading header blur.
   return editing ? content : (
-    <View style={[styles.screen, { backgroundColor: background }]}>{content}</View>
+    <View style={[styles.screen, { backgroundColor: background }]}>
+      {content}
+      <View style={{ position: "absolute", top: insets.top + 4, left: 0, right: 0 }}>
+        <HostChip />
+      </View>
+    </View>
   );
 }
 
@@ -261,11 +277,13 @@ function PickCard({
   selected,
   editing,
   onPress,
+  hosts,
 }: {
   label: string;
   icon: ReactElement;
   selected: boolean;
   editing: boolean;
+  hosts?: { fingerprint: string; name: string }[];
   onPress: () => void;
 }) {
   const colors = useColors();
@@ -277,9 +295,10 @@ function PickCard({
         label={label}
         showChevron={false}
         accessory={
-          selected ? (
-            <Icon name="check" size={18} color={colors.accent} />
-          ) : null
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <HostTags hosts={hosts ?? []} />
+            {selected ? <Icon name="check" size={18} color={colors.accent} /> : null}
+          </View>
         }
         onPress={onPress}
       />
@@ -297,9 +316,12 @@ function PickCard({
       ]}
     >
       <View style={styles.cardIcon}>{icon}</View>
-      <Text style={styles.cardLabel} numberOfLines={1}>
-        {label}
-      </Text>
+      <View style={styles.cardText}>
+        <Text style={styles.cardLabel} numberOfLines={1}>
+          {label}
+        </Text>
+        <HostTags hosts={hosts ?? []} />
+      </View>
       <View style={[styles.check, selected && styles.checkSelected]}>
         {selected ? (
           <Icon
@@ -398,8 +420,8 @@ const useStyles = themedStyles((colors) => {
       width: 28,
       alignItems: "center",
     },
+    cardText: { flex: 1, gap: 4 },
     cardLabel: {
-      flex: 1,
       color: colors.content,
       fontSize: 17,
     },

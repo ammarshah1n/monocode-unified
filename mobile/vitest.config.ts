@@ -13,6 +13,8 @@ export default defineConfig({
     },
   },
   esbuild: { jsx: "automatic" },
+  // The protocol round-trip suite lives just outside the mobile project.
+  server: { fs: { allow: [fileURLToPath(new URL("..", import.meta.url))] } },
   test: {
     environment: "happy-dom",
     // Protocol round trips need both the desktop and mobile dependency trees.
