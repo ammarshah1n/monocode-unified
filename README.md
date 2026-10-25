@@ -14,6 +14,10 @@
 
 Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, Antigravity, Pi, omp, fx, Hermes Agent, and Devin. If they’re installed and logged in, MonoCode can run them. Tabs are sessions. The composer is the input. MonoCode does not sell tokens.
 
+## Ammar's multi-device setup (this fork)
+
+One project list across your Mac, a Linux host and your iPhone, with a Host chip and cross-folder split screen. Start at **[docs/SETUP-UNIFIED.md](docs/SETUP-UNIFIED.md)** — it has a block you can paste into Codex or Claude Code to set everything up for you.
+
 ## Install
 
 Install and sign in to at least one supported agent first. See [provider setup](docs/providers.md) for instructions.
