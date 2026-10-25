@@ -11,7 +11,7 @@ loopback HTTP + QUIC fixtures only. This is not an installed or enabled service.
 ## Build and checks
 
 ```sh
-cd /home/ammarshahin/scratch/monocode-src/crates/monocode-phone-sidecar
+cd crates/monocode-phone-sidecar
 CARGO_BUILD_JOBS=2 cargo build --release
 CARGO_BUILD_JOBS=2 cargo test -- --test-threads=2
 ```
