@@ -3309,6 +3309,12 @@ impl Conversation {
     // EmptySession.tsx: the composer centred under its question, or resting
     // where it will dock once a neighbouring pane squeezes it narrower than
     // the column. A narrow window alone keeps it centred.
+    fn release_arcade_when_not_empty(&mut self) {
+        if self.summary.has_messages || self.settings.mono.is_some() {
+            self.arcade = None;
+        }
+    }
+
     fn empty(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let games = cx
             .try_global::<crate::settings::Preferences>()
@@ -3694,6 +3700,7 @@ mod composer_motion_tests {
 }
 impl Render for Conversation {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.release_arcade_when_not_empty();
         if self._input_focus.is_none() {
             let focus = self.input.focus_handle(cx);
             self._input_focus = Some([

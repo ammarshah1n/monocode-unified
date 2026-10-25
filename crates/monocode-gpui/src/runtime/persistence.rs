@@ -66,9 +66,8 @@ impl PendingSave {
                     .agent_settings(session)?
                     .is_some_and(|settings| settings.account.id == *account)
                     && store
-                        .sessions()?
-                        .iter()
-                        .any(|current| current.id == session && current.provider == *provider)
+                        .mono_session(session)?
+                        .is_some_and(|current| current.provider == *provider)
             } else {
                 true
             };

@@ -218,6 +218,7 @@ pub struct MetalRenderer {
     core_video_texture_cache: CFRetained<CVMetalTextureCache>,
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
+    path_intermediate_used: Option<Instant>,
     path_sample_count: u32,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
@@ -535,6 +536,7 @@ impl MetalRenderer {
             core_video_texture_cache,
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
+            path_intermediate_used: None,
             path_sample_count: PATH_SAMPLE_COUNT,
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
@@ -567,7 +569,11 @@ impl MetalRenderer {
         if let Some(layer) = &self.layer {
             layer.set_drawable_size(CGSize::new(size.width.0 as f64, size.height.0 as f64));
         }
-        self.update_path_intermediate_textures(size);
+        if size.width.0 <= 0 || size.height.0 <= 0 {
+            self.path_intermediate_texture = None;
+            self.path_intermediate_msaa_texture = None;
+            self.path_intermediate_used = None;
+        }
     }
 
     fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) {
@@ -577,6 +583,15 @@ impl MetalRenderer {
         if size.width.0 <= 0 || size.height.0 <= 0 {
             self.path_intermediate_texture = None;
             self.path_intermediate_msaa_texture = None;
+            self.path_intermediate_used = None;
+            return;
+        }
+        let same_size = self.path_intermediate_texture.as_ref().is_some_and(|texture| {
+            texture.width() == size.width.0 as u64 && texture.height() == size.height.0 as u64
+        });
+        let has_required_msaa = self.path_sample_count <= 1
+            || self.path_intermediate_msaa_texture.is_some();
+        if same_size && has_required_msaa {
             return;
         }
 
@@ -685,6 +700,9 @@ impl MetalRenderer {
                 scene.surfaces.len(),
             )
         })?;
+        if !scene.paths.is_empty() {
+            self.update_path_intermediate_textures(viewport_size);
+        }
         let command_buffer = self.draw_primitives_to_texture(
             scene,
             &instance_bindings,
@@ -692,6 +710,9 @@ impl MetalRenderer {
             texture,
             viewport_size,
         )?;
+        if !scene.paths.is_empty() {
+            self.path_intermediate_used = Some(Instant::now());
+        }
 
         let used = writer.used();
         self.instance_buffer_pool.lock().note_frame(used);
@@ -759,9 +780,6 @@ impl MetalRenderer {
         // Headless callers do not have a Cocoa event-loop pool to release
         // autoreleased command buffers and render-pass descriptors.
         objc2::rc::autoreleasepool(|_| {
-            // Update path intermediate textures for this size
-            self.update_path_intermediate_textures(size);
-
             // Create an offscreen texture as render target
             let texture_descriptor = metal::TextureDescriptor::new();
             texture_descriptor.set_width(size.width.0 as u64);
@@ -813,8 +831,6 @@ impl MetalRenderer {
         }
 
         objc2::rc::autoreleasepool(|_| {
-            self.update_path_intermediate_textures(size);
-
             let needs_new_target = self.headless_render_target.as_ref().is_none_or(|texture| {
                 texture.width() != size.width.0 as u64 || texture.height() != size.height.0 as u64
             });
@@ -862,6 +878,11 @@ impl MetalRenderer {
         if self.backdrop_used.as_ref().is_none_or(idle) {
             self.backdrop_scratch = None;
             self.backdrop_used = None;
+        }
+        if self.path_intermediate_used.as_ref().is_none_or(idle) {
+            self.path_intermediate_texture = None;
+            self.path_intermediate_msaa_texture = None;
+            self.path_intermediate_used = None;
         }
         let bytes = self
             .edge_fade_scratch
@@ -2612,6 +2633,36 @@ mod tests {
         CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
         CVPixelBufferUnlockBaseAddress, kCVPixelBufferIOSurfacePropertiesKey,
     };
+
+    #[test]
+    fn path_intermediate_texture_is_lazy_and_released_after_idle() {
+        let mut renderer =
+            MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())));
+        let size = size(DevicePixels(16), DevicePixels(16));
+        let mut empty = Scene::default();
+        empty.finish();
+        renderer.render_scene_to_image(&empty, size).unwrap();
+        assert!(renderer.path_intermediate_texture.is_none());
+
+        let mut builder = gpui::PathBuilder::fill();
+        builder.move_to(point(gpui::px(2.), gpui::px(2.)));
+        builder.line_to(point(gpui::px(14.), gpui::px(2.)));
+        builder.line_to(point(gpui::px(8.), gpui::px(14.)));
+        builder.close();
+        let mut path = builder.build().unwrap();
+        path.color = gpui::white().into();
+        let mut scene = Scene::default();
+        scene.insert_primitive(path.scale(1.));
+        scene.finish();
+        renderer.render_scene_to_image(&scene, size).unwrap();
+        assert!(renderer.path_intermediate_texture.is_some());
+        assert!(renderer.path_intermediate_msaa_texture.is_some());
+
+        renderer.path_intermediate_used = Some(Instant::now() - SCRATCH_IDLE);
+        renderer.release_idle_scratch();
+        assert!(renderer.path_intermediate_texture.is_none());
+        assert!(renderer.path_intermediate_msaa_texture.is_none());
+    }
 
     #[test]
     fn render_core_video_surface() {
