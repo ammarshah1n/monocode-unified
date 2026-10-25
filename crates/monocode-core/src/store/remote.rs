@@ -53,8 +53,8 @@ pub fn auto_link_projects(
     let remote_projects: Vec<_> = remote_projects
         .into_iter()
         .filter_map(|project| {
-            folder_name(&project.cwd)
-                .map(|name| (project.environment_id.clone(), name.to_lowercase(), project))
+            let name = folder_name(&project.cwd)?.to_lowercase();
+            Some((project.environment_id.clone(), name, project))
         })
         .collect();
     let mut remote_counts = HashMap::new();
