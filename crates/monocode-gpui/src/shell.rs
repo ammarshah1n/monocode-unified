@@ -3314,7 +3314,13 @@ impl Shell {
         let navigation_revision = self.navigation_revision;
         let target = self.workspace.active;
         let store = self.store.clone();
-        let cwd = self.workspace.project.clone();
+        let cwd = target.map_or_else(
+            || self.workspace.project.clone(),
+            |id| {
+                let owner = self.workspace.session_for_pane(id);
+                self.canonical_project_path(&self.session_metadata(owner, cx).summary.cwd)
+            },
+        );
         let worktree = target.and_then(|id| {
             let path = self.session_working_copy(id, cx);
             (path != cwd).then(|| crate::worktree_switcher::WorktreeFocus {
@@ -11598,17 +11604,18 @@ mod tests {
         // and the tab that held it closes.
         window
             .update(cx, |shell, _, cx| {
-                shell.sessions[&a].update(cx, |s, _| {
-                    s.summary.cwd = "/work/monocode".into();
-                    s.summary.has_messages = true;
-                });
+                for id in [a, b] {
+                    shell.sessions[&id].update(cx, |s, _| s.busy = true);
+                }
+                shell.workspace.preferences.working_agents = true;
+                shell.workspace.sidebar_activity_visible = true;
                 shell.invalidate_chrome(cx);
             })
             .unwrap();
         cx.run_until_parked();
         let row = cx
-            .debug_bounds(Box::leak(format!("sidebar-session-{a}").into_boxed_str()))
-            .unwrap()
+            .debug_bounds(Box::leak(format!("live-agent-{a}").into_boxed_str()))
+            .expect("the live-agents strip includes chats from other projects")
             .center();
         let below = point(right.center().x, right.bottom() - px(20.));
         cx.simulate_mouse_down(row, MouseButton::Left, Modifiers::default());
@@ -11627,11 +11634,18 @@ mod tests {
         cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
         window
-            .update(cx, |shell, _, _| {
+            .update(cx, |shell, window, cx| {
                 assert_eq!(shell.workspace.tabs, [b]);
                 assert_eq!(shell.workspace.layout(b).leaf_ids(), [b, new, a]);
                 assert_eq!(shell.workspace.active, Some(a));
+                assert_eq!(shell.workspace.project, "/work/another-project");
+                assert!(shell.visible_tabs(cx).contains(&TitleTab::Session(b)));
                 assert!(shell.pane_drag.is_none());
+                shell.focus_pane(b, window, cx);
+                assert_eq!(shell.workspace.project, "/work/monocode");
+                assert!(shell.visible_tabs(cx).contains(&TitleTab::Session(b)));
+                shell.focus_pane(a, window, cx);
+                assert_eq!(shell.workspace.project, "/work/another-project");
             })
             .unwrap();
         cx.refresh().unwrap();
@@ -11749,6 +11763,34 @@ mod tests {
             })
             .unwrap();
     }
+    #[gpui::test]
+    fn cross_project_split_tabs_stay_visible_and_cmd_d_uses_the_focused_folder(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, foreign, local) = window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.workspace.place(foreign, local, Edge::Left);
+                assert_eq!(shell.workspace.project, "/work/monocode");
+                assert!(shell.visible_tabs(cx).contains(&TitleTab::Session(local)));
+                shell.split_session(SplitDir::Right, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                let created = shell.workspace.active.unwrap();
+                assert_eq!(
+                    shell.session_metadata(created, cx).summary.cwd,
+                    "/work/another-project"
+                );
+                assert_eq!(shell.workspace.project, "/work/another-project");
+                assert!(shell.workspace.layout(local).leaf_ids().contains(&foreign));
+                assert!(shell.visible_tabs(cx).contains(&TitleTab::Session(local)));
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn a_split_pane_slides_in_from_its_edge_then_settles(cx: &mut TestAppContext) {
         let (window, _, b) = window(cx);
