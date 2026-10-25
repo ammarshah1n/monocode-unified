@@ -11679,6 +11679,20 @@ mod tests {
 
         // A tab press whose release the title bar swallowed stays inert:
         // dragging a pane below never drags that tab.
+        // With the foreign pane gone, b's tab belongs to the other folder and
+        // leaves this folder's strip. The rest of the test runs within one
+        // folder, so both tabs share a strip again.
+        window
+            .update(cx, |shell, w, cx| {
+                assert!(!shell.visible_tabs(cx).contains(&TitleTab::Session(b)));
+                let cwd = shell.session_metadata(b, cx).summary.cwd.clone();
+                shell.sessions[&a].update(cx, |chat, _| chat.summary.cwd = cwd.clone());
+                shell.workspace.tab_workspaces.insert(a, cwd);
+                shell.open(b, w, cx);
+            })
+            .unwrap();
+        cx.refresh().unwrap();
+        cx.run_until_parked();
         let pressed = cx
             .debug_bounds(Box::leak(format!("title-tab-{b}").into_boxed_str()))
             .unwrap()
