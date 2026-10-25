@@ -803,6 +803,97 @@ fn notes_reminders_search_and_read_only_connections_use_the_same_data() {
 }
 
 #[test]
+fn streaming_write_reuses_last_written_blocks_without_reload_or_byte_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("shared.sqlite");
+    let store = Store::open_monocode(&path).unwrap();
+    let session = store.create("codex", "/project").unwrap();
+    let original = store.persisted_session_id(session.id).unwrap();
+    let mut transcript = Transcript::default();
+    transcript.begin("user");
+    transcript.append("Prompt");
+    transcript.begin("assistant");
+    store.write_rows(session.id, 0, &transcript.rows).unwrap();
+
+    let shared = store.shared.as_ref().unwrap();
+    assert_eq!(shared.write_row_reloads.get(), 1);
+    let (last_written, _) = shared.last_written.borrow()[&session.id].clone();
+    let start = transcript.append(" streamed");
+    let expected = blocks::merge(&last_written, start, &transcript.rows[start..]).unwrap();
+    let expected_bytes = encode(&expected).unwrap();
+
+    store
+        .write_rows(session.id, start, &transcript.rows[start..])
+        .unwrap();
+    let actual_bytes: String = store
+        .conn
+        .query_row(
+            "SELECT blocks_json FROM sessions WHERE id=?1",
+            [&original],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let actual: Vec<Value> = parse(&actual_bytes).unwrap();
+    let revision = HistoryRevision::of(&actual);
+    assert_eq!(actual_bytes, expected_bytes);
+    assert_eq!(shared.write_row_reloads.get(), 1, "second flush uses cache");
+    assert_eq!(shared.snapshots.borrow()[&session.id], revision);
+    assert_eq!(shared.last_written.borrow()[&session.id].1, revision);
+}
+
+#[test]
+fn streaming_write_reloads_and_preserves_source_after_an_external_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("shared.sqlite");
+    let store = Store::open_monocode(&path).unwrap();
+    let session = store.create("codex", "/project").unwrap();
+    let original = store.persisted_session_id(session.id).unwrap();
+    let mut transcript = Transcript::default();
+    transcript.begin("user");
+    transcript.append("Prompt");
+    transcript.begin("assistant");
+    store.write_rows(session.id, 0, &transcript.rows).unwrap();
+
+    let external = Connection::open(&path).unwrap();
+    let external_blocks = vec![
+        json!({"id":"source-user","role":"user","text":"External prompt"}),
+        json!({"id":"source-answer","role":"assistant","text":"External answer"}),
+    ];
+    let external_bytes = encode(&external_blocks).unwrap();
+    external
+        .execute(
+            "UPDATE sessions SET blocks_json=?2 WHERE id=?1",
+            params![original, external_bytes],
+        )
+        .unwrap();
+
+    let error = store
+        .write_rows(session.id, 0, &transcript.rows)
+        .unwrap_err();
+    assert!(error.contains("changed in another window"), "{error}");
+    assert_eq!(store.shared.as_ref().unwrap().write_row_reloads.get(), 2);
+    let actual: String = store
+        .conn
+        .query_row(
+            "SELECT blocks_json FROM sessions WHERE id=?1",
+            [&original],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        actual, external_bytes,
+        "external chat bytes remain untouched"
+    );
+    assert!(store
+        .shared
+        .as_ref()
+        .unwrap()
+        .last_written
+        .borrow()
+        .is_empty());
+}
+
+#[test]
 fn history_revision_is_fixed_size_and_covers_original_rich_metadata() {
     assert_eq!(std::mem::size_of::<HistoryRevision>(), 32);
     let blocks = vec![

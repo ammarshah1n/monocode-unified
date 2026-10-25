@@ -24,6 +24,20 @@ fn conversation(cx: &mut TestAppContext) -> WindowHandle<Conversation> {
 }
 
 #[gpui::test]
+fn nonempty_chat_releases_its_empty_session_arcade(cx: &mut TestAppContext) {
+    let window = conversation(cx);
+    window
+        .update(cx, |view, window, cx| {
+            view.arcade = Some(cx.new(crate::arcade::Arcade::new));
+            assert!(view.arcade.is_some());
+            view.summary.has_messages = true;
+            let _ = view.render(window, cx);
+            assert!(view.arcade.is_none());
+        })
+        .unwrap();
+}
+
+#[gpui::test]
 fn mono_messages_steer_the_ready_provider_once_and_keep_their_send_time(cx: &mut TestAppContext) {
     let window = conversation(cx);
     let (send, receive) = std::sync::mpsc::channel();

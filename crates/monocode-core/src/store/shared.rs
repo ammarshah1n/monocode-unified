@@ -14,11 +14,13 @@ use crate::{
     context::Usage,
     transcript::{Row, Transcript},
 };
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
 };
@@ -29,6 +31,10 @@ pub(super) struct Shared {
     extras: RefCell<BTreeMap<String, String>>,
     extras_path: Option<PathBuf>,
     snapshots: RefCell<HashMap<i64, HistoryRevision>>,
+    last_written: RefCell<HashMap<i64, (Vec<Value>, HistoryRevision)>>,
+    last_write_data_version: Cell<Option<i64>>,
+    #[cfg(test)]
+    write_row_reloads: Cell<usize>,
     /// The first block sequence of each indexed Mono's row numbering.
     windows: RefCell<HashMap<i64, i64>>,
     queues: RefCell<HashMap<i64, String>>,
@@ -308,6 +314,10 @@ impl Store {
                 extras: RefCell::new(extras),
                 extras_path,
                 snapshots: RefCell::new(HashMap::new()),
+                last_written: RefCell::new(HashMap::new()),
+                last_write_data_version: Cell::new(None),
+                #[cfg(test)]
+                write_row_reloads: Cell::new(0),
                 windows: RefCell::new(HashMap::new()),
                 queues: RefCell::new(HashMap::new()),
                 account_source: RefCell::new(None),
@@ -1029,6 +1039,12 @@ impl Store {
         Ok(Transcript { rows })
     }
     pub(super) fn shared_store_blocks(&self, id: i64, blocks: &[Value]) -> Result<(), String> {
+        self.shared
+            .as_ref()
+            .unwrap()
+            .last_written
+            .borrow_mut()
+            .remove(&id);
         let original = self.persisted_session_id(id)?;
         let (has_user, draft) = if let Some(from) = self.shared_window(id, &original)? {
             self.shared_store_indexed_blocks(&original, from, blocks)?;
@@ -1183,20 +1199,54 @@ impl Store {
         message_id: Option<&str>,
     ) -> Result<(), String> {
         self.shared_writable()?;
-        let tx = sql(self.conn.unchecked_transaction())?;
-        let current = self.shared_blocks(id)?;
-        if self
-            .shared
-            .as_ref()
-            .unwrap()
-            .snapshots
-            .borrow()
-            .get(&id)
-            .is_some_and(|old| !old.matches(&current))
-        {
-            return Err("This conversation changed in another window. Reopen it before saving; its data was preserved.".into());
+        // Acquire the writer reservation before checking data_version. This
+        // closes the race where another app writes after the check but before
+        // our save, while keeping the normal optimistic revision guard intact.
+        let tx = sql(Transaction::new_unchecked(
+            &self.conn,
+            TransactionBehavior::Immediate,
+        ))?;
+        let shared = self.shared.as_ref().unwrap();
+        let data_version: i64 = sql(self.conn.query_row("PRAGMA data_version", [], |r| r.get(0)))?;
+        let outside_write = shared
+            .last_write_data_version
+            .get()
+            .is_some_and(|last| last != data_version);
+        if outside_write {
+            // data_version covers the whole database, so none of the other
+            // session copies can be trusted after an outside commit.
+            shared.last_written.borrow_mut().clear();
         }
-        let mut next = blocks::merge(&current, start, rows)?;
+        let cached_next = {
+            let last_written = shared.last_written.borrow();
+            let snapshots = shared.snapshots.borrow();
+            (!outside_write)
+                .then(|| last_written.get(&id))
+                .flatten()
+                .and_then(|(current, revision)| {
+                    (snapshots.get(&id) == Some(revision))
+                        .then(|| blocks::merge(current, start, rows))
+                })
+        };
+        let mut next = match cached_next {
+            Some(next) => next?,
+            None => {
+                #[cfg(test)]
+                shared
+                    .write_row_reloads
+                    .set(shared.write_row_reloads.get() + 1);
+                let current = self.shared_blocks(id)?;
+                if shared
+                    .snapshots
+                    .borrow()
+                    .get(&id)
+                    .is_some_and(|old| !old.matches(&current))
+                {
+                    return Err("This conversation changed in another window. Reopen it before saving; its data was preserved.".into());
+                }
+                blocks::merge(&current, start, rows)?
+            }
+        };
         if let Some(message) = message_id {
             if let Some(prompt) = next
                 .iter_mut()
@@ -1235,12 +1285,13 @@ impl Store {
                 .borrow_mut()
                 .insert(id, queue);
         }
-        self.shared
-            .as_ref()
-            .unwrap()
-            .snapshots
+        let revision = HistoryRevision::of(&next);
+        shared.snapshots.borrow_mut().insert(id, revision);
+        shared
+            .last_written
             .borrow_mut()
-            .insert(id, HistoryRevision::of(&next));
+            .insert(id, (next, revision));
+        shared.last_write_data_version.set(Some(data_version));
         // The source appRequestId is the durable, transactional receipt.
         Ok(())
     }
@@ -1515,12 +1566,9 @@ impl Store {
             .conn
             .execute("DELETE FROM sessions WHERE id=?1", [original]))?;
         sql(tx.commit())?;
-        self.shared
-            .as_ref()
-            .unwrap()
-            .snapshots
-            .borrow_mut()
-            .remove(&id);
+        let shared = self.shared.as_ref().unwrap();
+        shared.snapshots.borrow_mut().remove(&id);
+        shared.last_written.borrow_mut().remove(&id);
         Ok(())
     }
     pub(super) fn shared_detach_worktree(
