@@ -33,6 +33,7 @@ pub(super) struct Shared {
     snapshots: RefCell<HashMap<i64, HistoryRevision>>,
     last_written: RefCell<HashMap<i64, (Vec<Value>, HistoryRevision)>>,
     last_write_data_version: Cell<Option<i64>>,
+last_write_changes: Cell<Option<u64>>,
     #[cfg(test)]
     write_row_reloads: Cell<usize>,
     /// The first block sequence of each indexed Mono's row numbering.
@@ -316,6 +317,7 @@ impl Store {
                 snapshots: RefCell::new(HashMap::new()),
                 last_written: RefCell::new(HashMap::new()),
                 last_write_data_version: Cell::new(None),
+last_write_changes: Cell::new(None),
                 #[cfg(test)]
                 write_row_reloads: Cell::new(0),
                 windows: RefCell::new(HashMap::new()),
@@ -1211,7 +1213,13 @@ impl Store {
         let outside_write = shared
             .last_write_data_version
             .get()
-            .is_some_and(|last| last != data_version);
+            .is_some_and(|last| last != data_version)
+            // data_version ignores this connection's own writes, so any other
+            // statement run here since our last save also voids the cache.
+            || shared
+                .last_write_changes
+                .get()
+                .is_some_and(|last| last != self.conn.total_changes());
         if outside_write {
             // data_version covers the whole database, so none of the other
             // session copies can be trusted after an outside commit.
@@ -1292,6 +1300,7 @@ impl Store {
             .borrow_mut()
             .insert(id, (next, revision));
         shared.last_write_data_version.set(Some(data_version));
+        shared.last_write_changes.set(Some(self.conn.total_changes()));
         // The source appRequestId is the durable, transactional receipt.
         Ok(())
     }
