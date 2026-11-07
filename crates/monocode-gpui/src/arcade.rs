@@ -187,89 +187,94 @@ impl Render for Arcade {
                 canvas(
                     |_, _, _| {},
                     move |bounds, _, window, _| {
-                        let cols = (bounds.size.width.as_f32() / 7.).ceil().max(7.) as usize;
-                        let h = bounds.size.height.as_f32();
-                        let opacity = |y: f32| {
-                            if playing {
-                                1.
-                            } else {
-                                (1. - ((y / h - 0.65) / 0.35).clamp(0., 1.)).max(0.)
-                            }
-                        };
-                        for y in 0..(h / 7.).ceil() as usize {
-                            for x in 0..cols {
-                                let a = 0.06 * frame.fade * opacity(y as f32 * 7.);
-                                if a > 0.005 {
-                                    window.paint_quad(fill(
-                                        gpui::Bounds::new(
-                                            bounds.origin
-                                                + point(px(x as f32 * 7.), px(y as f32 * 7.)),
-                                            size(px(6.), px(6.)),
-                                        ),
-                                        content(a),
-                                    ));
+                        // Stable scene ordering retains quad submission order before the Pac-Man path.
+                        window.paint_layer(bounds, |window| {
+                            let cols = (bounds.size.width.as_f32() / 7.).ceil().max(7.) as usize;
+                            let h = bounds.size.height.as_f32();
+                            let opacity = |y: f32| {
+                                if playing {
+                                    1.
+                                } else {
+                                    (1. - ((y / h - 0.65) / 0.35).clamp(0., 1.)).max(0.)
                                 }
-                            }
-                        }
-                        for (index, alpha) in &frame.cells {
-                            let x = index % cols;
-                            let y = index / cols;
-                            window.paint_quad(fill(
-                                gpui::Bounds::new(
-                                    bounds.origin + point(px(x as f32 * 7.), px(y as f32 * 7.)),
-                                    size(px(6.), px(6.)),
-                                ),
-                                content(alpha * 0.72 * frame.dim * opacity(y as f32 * 7.)),
-                            ));
-                        }
-                        for sprite in &frame.sprites {
-                            let side = sprite.size * 7. * 0.8;
-                            let x = sprite.cx * 7. + 3.;
-                            let y = sprite.cy * 7. + 3.;
-                            let alpha = sprite.alpha * frame.dim * opacity(y);
-                            if sprite.kind == "pacman" {
-                                let angle = sprite.dy.atan2(sprite.dx);
-                                let mouth = sprite.mouth * std::f32::consts::PI;
-                                let mut path = gpui::PathBuilder::fill();
-                                let center = bounds.origin + point(px(x), px(y));
-                                path.move_to(center);
-                                for i in 0..=32 {
-                                    let a = angle
-                                        + mouth
-                                        + (std::f32::consts::TAU - 2. * mouth) * i as f32 / 32.;
-                                    path.line_to(
-                                        center
-                                            + point(
-                                                px(a.cos() * side / 2.),
-                                                px(a.sin() * side / 2.),
+                            };
+                            for y in 0..(h / 7.).ceil() as usize {
+                                for x in 0..cols {
+                                    let a = 0.06 * frame.fade * opacity(y as f32 * 7.);
+                                    if a > 0.005 {
+                                        window.paint_quad(fill(
+                                            gpui::Bounds::new(
+                                                bounds.origin
+                                                    + point(px(x as f32 * 7.), px(y as f32 * 7.)),
+                                                size(px(6.), px(6.)),
                                             ),
-                                    );
+                                            content(a),
+                                        ));
+                                    }
                                 }
-                                path.close();
-                                if let Ok(path) = path.build() {
-                                    window.paint_path(path, content(alpha * 0.92));
-                                }
-                            } else if let Some(rows) = &sprite.rows {
-                                let unit = side / 8.;
-                                for (iy, row) in rows.iter().enumerate() {
-                                    for (ix, pixel) in row.bytes().enumerate() {
-                                        if pixel == b'#' && !sprite.eyes.unwrap_or(false) {
-                                            window.paint_quad(fill(
-                                                gpui::Bounds::new(
-                                                    bounds.origin
-                                                        + point(
-                                                            px(x - side / 2. + ix as f32 * unit),
-                                                            px(y - side / 2. + iy as f32 * unit),
-                                                        ),
-                                                    size(px(unit), px(unit)),
+                            }
+                            for (index, alpha) in &frame.cells {
+                                let x = index % cols;
+                                let y = index / cols;
+                                window.paint_quad(fill(
+                                    gpui::Bounds::new(
+                                        bounds.origin + point(px(x as f32 * 7.), px(y as f32 * 7.)),
+                                        size(px(6.), px(6.)),
+                                    ),
+                                    content(alpha * 0.72 * frame.dim * opacity(y as f32 * 7.)),
+                                ));
+                            }
+                            for sprite in &frame.sprites {
+                                let side = sprite.size * 7. * 0.8;
+                                let x = sprite.cx * 7. + 3.;
+                                let y = sprite.cy * 7. + 3.;
+                                let alpha = sprite.alpha * frame.dim * opacity(y);
+                                if sprite.kind == "pacman" {
+                                    let angle = sprite.dy.atan2(sprite.dx);
+                                    let mouth = sprite.mouth * std::f32::consts::PI;
+                                    let mut path = gpui::PathBuilder::fill();
+                                    let center = bounds.origin + point(px(x), px(y));
+                                    path.move_to(center);
+                                    for i in 0..=32 {
+                                        let a = angle
+                                            + mouth
+                                            + (std::f32::consts::TAU - 2. * mouth) * i as f32 / 32.;
+                                        path.line_to(
+                                            center
+                                                + point(
+                                                    px(a.cos() * side / 2.),
+                                                    px(a.sin() * side / 2.),
                                                 ),
-                                                content(alpha * 0.8),
-                                            ));
+                                        );
+                                    }
+                                    path.close();
+                                    if let Ok(path) = path.build() {
+                                        window.paint_path(path, content(alpha * 0.92));
+                                    }
+                                } else if let Some(rows) = &sprite.rows {
+                                    let unit = side / 8.;
+                                    for (iy, row) in rows.iter().enumerate() {
+                                        for (ix, pixel) in row.bytes().enumerate() {
+                                            if pixel == b'#' && !sprite.eyes.unwrap_or(false) {
+                                                window.paint_quad(fill(
+                                                    gpui::Bounds::new(
+                                                        bounds.origin
+                                                            + point(
+                                                                px(x - side / 2.
+                                                                    + ix as f32 * unit),
+                                                                px(y - side / 2.
+                                                                    + iy as f32 * unit),
+                                                            ),
+                                                        size(px(unit), px(unit)),
+                                                    ),
+                                                    content(alpha * 0.8),
+                                                ));
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
+                        });
                     },
                 )
                 .absolute()

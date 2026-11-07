@@ -249,19 +249,25 @@ impl FileEditor {
                 cx.notify();
             }),
         ];
+        // Edits made outside the app. Git state arrives as `GitChanged` (the
+        // subscription above), which the shared checkout watcher raises only
+        // when something changed; polling it here ran several `git` processes
+        // every pass. The app being in the background has nothing to refresh,
+        // and activation reads again within a pass.
         let poll = cx.spawn(async move |this, cx| {
+            const EVERY: Duration = Duration::from_secs(2);
+            let mut wait = EVERY;
             loop {
-                cx.background_executor().timer(Duration::from_secs(2)).await;
-                if this
-                    .update(cx, |this, cx| {
-                        if this.visible && !this.saving {
-                            this.load(false, cx);
-                            this.refresh_git(cx);
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
+                cx.background_executor().timer(wait).await;
+                match this.update(cx, |this, cx| {
+                    let active = cx.active_window().is_some();
+                    if active && this.visible && !this.saving {
+                        this.load(false, cx);
+                    }
+                    crate::power::poll_interval(EVERY, active, cx)
+                }) {
+                    Ok(next) => wait = next,
+                    Err(_) => break,
                 }
             }
         });

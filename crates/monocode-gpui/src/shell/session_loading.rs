@@ -142,6 +142,20 @@ impl NewSessionDefaults {
         cwd: &str,
         worktree_cwd: Option<String>,
     ) -> Result<(Session, monocode_core::agent::Settings), String> {
+        self.create_at(store, cwd, cwd, worktree_cwd, None)
+    }
+
+    /// Like `create`, but the session lives at `target_cwd` (a remote machine's
+    /// folder for a linked project) and may take over an unstarted session's
+    /// picked model controls (`carried`). Defaults still come from `cwd`.
+    pub(super) fn create_at(
+        self,
+        store: &monocode_core::store::Store,
+        cwd: &str,
+        target_cwd: &str,
+        worktree_cwd: Option<String>,
+        carried: Option<monocode_core::agent::Settings>,
+    ) -> Result<(Session, monocode_core::agent::Settings), String> {
         let Self {
             kind,
             model,
@@ -149,7 +163,7 @@ impl NewSessionDefaults {
             access,
             effort,
         } = self;
-        let summary = store.create(kind.id(), cwd)?;
+        let summary = store.create(kind.id(), target_cwd)?;
         let mut settings = new_session_settings(
             store
                 .desktop_preferences()
@@ -166,6 +180,15 @@ impl NewSessionDefaults {
             });
             settings.effort = Some(effort);
         }
+        if let Some(picked) = carried {
+            settings.model = picked.model;
+            settings.effort = picked.effort;
+            settings.model_settings = picked.model_settings;
+            settings.fast = picked.fast;
+            settings.service_tier = picked.service_tier;
+            settings.thinking = picked.thinking;
+            settings.access = picked.access;
+        }
         settings.account = account;
         settings.worktree_cwd = worktree_cwd;
         if settings.model.is_some()
@@ -173,7 +196,7 @@ impl NewSessionDefaults {
             || !settings.model_settings.is_empty()
             || settings.worktree_cwd.is_some()
             || settings.account.id != monocode_core::accounts::DEFAULT
-            || access != Default::default()
+            || settings.access != Default::default()
         {
             store.save_agent_settings(summary.id, &settings)?;
         }

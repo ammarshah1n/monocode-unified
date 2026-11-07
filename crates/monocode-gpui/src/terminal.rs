@@ -284,18 +284,28 @@ impl Terminal {
                 }
             }
         });
-        // TerminalView's 1s foreground poll; a hidden dock has no title to paint.
+        // TerminalView's 1s foreground poll. A hidden dock has no title to
+        // paint, so it checks back slowly; an exited shell has no foreground.
         let poll = cx.spawn(async move |this, cx| {
+            let mut wait = Duration::from_secs(1);
             loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let Ok(Some((fd, pid))) = this.update(cx, |this, _| {
-                    (this.visible && !this.exited).then_some((this.master_fd, this.shell_pid))
+                cx.background_executor().timer(wait).await;
+                let Ok((exited, shown)) = this.update(cx, |this, _| {
+                    (
+                        this.exited,
+                        this.visible.then_some((this.master_fd, this.shell_pid)),
+                    )
                 }) else {
-                    if this.update(cx, |_, _| ()).is_err() {
-                        break;
-                    }
+                    break;
+                };
+                if exited {
+                    break;
+                }
+                let Some((fd, pid)) = shown else {
+                    wait = Duration::from_secs(4);
                     continue;
                 };
+                wait = Duration::from_secs(1);
                 let label = cx
                     .background_executor()
                     .spawn(async move { foreground_label(fd, pid) })

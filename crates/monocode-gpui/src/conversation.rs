@@ -116,6 +116,7 @@ enum ComposerMenu {
     Setting(usize),
     /// The commit pill's chevron above the composer.
     GitActions,
+    Host,
 }
 struct OpenMenu {
     kind: ComposerMenu,
@@ -124,6 +125,13 @@ struct OpenMenu {
 }
 use response_menu::ResponseMenu;
 pub(crate) struct SessionChanged;
+pub(crate) struct ProjectHostSelected(pub(crate) String, pub(crate) Option<String>);
+#[derive(Clone, Debug)]
+pub(crate) struct HostChoice {
+    pub environment_id: String,
+    pub name: String,
+    pub mapped: bool,
+}
 pub(crate) struct ChooseFolder(pub(crate) AnchorSlot);
 /// The review card asked to open the session's recorded changes.
 pub(crate) struct OpenSessionChanges(pub(crate) crate::review::ReviewTab);
@@ -216,6 +224,11 @@ pub(crate) struct Conversation {
     add_anchor: AnchorSlot,
     model_anchor: AnchorSlot,
     access_anchor: AnchorSlot,
+    host_anchor: AnchorSlot,
+    host_project: Option<String>,
+    host_available: bool,
+    host_choices: Vec<HostChoice>,
+    selected_host: Option<String>,
     account_anchor: AnchorSlot,
     workspace_anchor: AnchorSlot,
     git_action_anchor: AnchorSlot,
@@ -328,6 +341,21 @@ impl Conversation {
         } else {
             self.draft_hint
         }
+    }
+    /// The composer text and picked model controls of a session that has not
+    /// started: nothing sent, no attachments, no saved draft. Only such a
+    /// session can still change machine.
+    pub(crate) fn unstarted_composer(&self, cx: &gpui::App) -> Option<(String, Settings)> {
+        (!self.summary.has_messages
+            && !self.busy
+            && self.attachments.is_empty()
+            && !self.has_saved_draft())
+        .then(|| {
+            (
+                self.input.read(cx).content.to_string(),
+                self.settings.clone(),
+            )
+        })
     }
     pub(crate) fn archive_shortcut_blocked(&self, cx: &gpui::App) -> bool {
         self.menu.is_some()
@@ -673,6 +701,11 @@ impl Conversation {
             add_anchor: AnchorSlot::default(),
             model_anchor: AnchorSlot::default(),
             access_anchor: AnchorSlot::default(),
+            host_anchor: AnchorSlot::default(),
+            host_project: None,
+            host_available: false,
+            host_choices: Vec::new(),
+            selected_host: None,
             account_anchor: AnchorSlot::default(),
             workspace_anchor: AnchorSlot::default(),
             git_action_anchor: AnchorSlot::default(),
@@ -888,6 +921,22 @@ impl Conversation {
     /// preference: queued when it steers, steering when it queues.
     fn send_follow_up(&mut self, invert: bool, cx: &mut Context<Self>) {
         if self.is_remote() && self.remote_send_guard(cx) {
+            return;
+        }
+        // The Host chip says where a new session runs. A session that never
+        // started cannot quietly run on this Mac while the chip names another
+        // machine; the draft stays in the composer.
+        if !self.is_remote()
+            && !self.summary.has_messages
+            && self.settings.mono.is_none()
+            && self.selected_host.is_some()
+        {
+            self.status = format!(
+                "This session is on This Mac, but the host is {}. Start a new session to run it there.",
+                self.selected_host_label()
+            )
+            .into();
+            cx.notify();
             return;
         }
         if self.needs_history_restore() {
@@ -1563,6 +1612,7 @@ impl Conversation {
 }
 
 impl EventEmitter<SessionChanged> for Conversation {}
+impl EventEmitter<ProjectHostSelected> for Conversation {}
 impl EventEmitter<ChooseFolder> for Conversation {}
 impl EventEmitter<OpenSessionChanges> for Conversation {}
 impl EventEmitter<Transfer> for Conversation {}
@@ -2022,6 +2072,25 @@ impl Conversation {
             }
             return;
         }
+        if id == "host:this-mac" {
+            if let Some(project) = self.host_project.clone() {
+                self.selected_host = None;
+                cx.emit(ProjectHostSelected(project, None));
+            }
+            return;
+        }
+        if let Some(environment) = id.strip_prefix("host:") {
+            if self
+                .host_choices
+                .iter()
+                .any(|choice| choice.mapped && choice.environment_id == environment)
+                && let Some(project) = self.host_project.clone()
+            {
+                self.selected_host = Some(environment.to_owned());
+                cx.emit(ProjectHostSelected(project, Some(environment.to_owned())));
+            }
+            return;
+        }
         if let Some(id) = id.strip_prefix("usage-account:") {
             if let Some(center) = crate::accounts::get(cx) {
                 let kind = Kind::from_id(&self.summary.provider);
@@ -2360,6 +2429,96 @@ impl Conversation {
         cx.emit(SessionChanged);
         true
     }
+    pub(crate) fn configure_project_hosts(
+        &mut self,
+        project: String,
+        available: bool,
+        choices: Vec<HostChoice>,
+        selected: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.host_project = Some(project);
+        self.host_available = available;
+        self.host_choices = choices;
+        self.selected_host = selected;
+        cx.notify();
+    }
+    pub(crate) fn select_project_host(
+        &mut self,
+        project: &str,
+        selected: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.host_project.as_deref() == Some(project) {
+            self.selected_host = selected;
+            cx.notify();
+        }
+    }
+    fn has_host_choices(&self) -> bool {
+        self.host_available
+    }
+    /// Where this session runs, from its own cwd.
+    pub(super) fn session_host_label(&self) -> &str {
+        match monocode_core::remote::parse_remote_path(&self.summary.cwd) {
+            None => "This Mac",
+            Some(path) => self
+                .host_choices
+                .iter()
+                .find(|choice| choice.environment_id == path.environment_id)
+                .map_or("Remote machine", |choice| choice.name.as_str()),
+        }
+    }
+    /// A started session cannot move, so its chip names the machine it runs
+    /// on. Until then it names the machine the session will start on.
+    fn selected_host_label(&self) -> &str {
+        if self.summary.has_messages {
+            return self.session_host_label();
+        }
+        self.selected_host
+            .as_deref()
+            .and_then(|environment| {
+                self.host_choices
+                    .iter()
+                    .find(|choice| choice.environment_id.as_str() == environment && choice.mapped)
+            })
+            .map_or("This Mac", |choice| choice.name.as_str())
+    }
+    fn project_host_menu_items(&self) -> Vec<MenuItem> {
+        // A started session cannot move: say where it runs, then label the
+        // ticks as the host for new sessions so the two never read as one.
+        let mut items = Vec::new();
+        if self.summary.has_messages {
+            items.push(MenuItem::Header(
+                format!("This session runs on {}", self.session_host_label()).into(),
+            ));
+            items.push(MenuItem::Header("New sessions start on".into()));
+        } else {
+            items.push(MenuItem::Header("New session host".into()));
+        }
+        items.push(
+            MenuAction::new("host:this-mac", "This Mac")
+                .icon("laptop")
+                .checked(self.selected_host.is_none())
+                .into(),
+        );
+        items.extend(self.host_choices.iter().map(|choice| {
+            let description: SharedString = if choice.mapped {
+                "New sessions will run on this machine.".into()
+            } else {
+                format!("Open this folder on {} first", choice.name).into()
+            };
+            MenuAction::new(
+                format!("host:{}", choice.environment_id),
+                choice.name.clone(),
+            )
+            .icon("server")
+            .checked(self.selected_host.as_deref() == Some(choice.environment_id.as_str()))
+            .disabled(!choice.mapped)
+            .description(description)
+            .into()
+        }));
+        items
+    }
     fn menu_is(&self, kind: ComposerMenu) -> bool {
         self.menu.as_ref().is_some_and(|open| open.kind == kind)
     }
@@ -2368,6 +2527,7 @@ impl Conversation {
             ComposerMenu::Add => &self.add_anchor,
             ComposerMenu::Model | ComposerMenu::Recent => &self.model_anchor,
             ComposerMenu::Access => &self.access_anchor,
+            ComposerMenu::Host => &self.host_anchor,
             ComposerMenu::Account => &self.account_anchor,
             ComposerMenu::Workspace => &self.workspace_anchor,
             ComposerMenu::GitActions => &self.git_action_anchor,
@@ -2648,6 +2808,12 @@ impl Conversation {
                 let items = self.mono_access_options();
                 ("Access", items, 288., MenuStyle::Access)
             }
+            ComposerMenu::Host => (
+                "New session host",
+                self.project_host_menu_items(),
+                280.,
+                MenuStyle::Composer,
+            ),
             ComposerMenu::Setting(ix) => self.mono_setting_menu(ix),
         }
     }
@@ -3015,6 +3181,23 @@ impl Conversation {
                                             .child(icon("chevron-down", 12.)),
                                     )
                                     .children(controls)
+                                    .when(self.has_host_choices(), |d| {
+                                        d.child(
+                                            tool_pill("composer-host", "Host")
+                                                .aria_label(format!("Host, {}", self.selected_host_label()))
+                                                .aria_expanded(self.menu_is(ComposerMenu::Host))
+                                                .child(self.host_anchor.probe())
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.toggle_menu(ComposerMenu::Host, window, cx)
+                                                }))
+                                                .child(
+                                                    div()
+                                                        .debug_selector(|| "composer-host-label".into())
+                                                        .child(pill_label(self.selected_host_label())),
+                                                )
+                                                .child(icon("chevron-down", 12.)),
+                                        )
+                                    })
                                     .child(
                                         tool_pill("composer-access", "Access")
                                             .aria_label(format!(
@@ -3344,6 +3527,12 @@ impl Conversation {
     // EmptySession.tsx: the composer centred under its question, or resting
     // where it will dock once a neighbouring pane squeezes it narrower than
     // the column. A narrow window alone keeps it centred.
+    fn release_arcade_when_not_empty(&mut self) {
+        if self.summary.has_messages || self.settings.mono.is_some() {
+            self.arcade = None;
+        }
+    }
+
     fn empty(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         // A chat background replaces the canvas; the ink only lives in motion.
         let fill = cx
@@ -3781,6 +3970,7 @@ mod composer_motion_tests {
 }
 impl Render for Conversation {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.release_arcade_when_not_empty();
         if self._input_focus.is_none() {
             let focus = self.input.focus_handle(cx);
             self._input_focus = Some([
@@ -4138,6 +4328,38 @@ mod menu_tests {
                 );
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn host_chip_text_has_even_padding_inside_its_box(cx: &mut TestAppContext) {
+        let window = conversation(cx);
+        window
+            .update(cx, |view, _, cx| {
+                cx.set_global(crate::settings::Preferences::default());
+                view.configure_project_hosts(
+                    "/test-project".into(),
+                    true,
+                    vec![HostChoice {
+                        environment_id: "remote-ui-tests".into(),
+                        name: "Fedora".into(),
+                        mapped: true,
+                    }],
+                    Some("remote-ui-tests".into()),
+                    cx,
+                );
+            })
+            .unwrap();
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.refresh().unwrap();
+        let pill = window
+            .update(visual, |view, _, _| view.host_anchor.get().unwrap())
+            .unwrap();
+        let label = visual.debug_bounds("composer-host-label").unwrap();
+        eprintln!("HOSTCHIP pill={pill:?} label={label:?}");
+        let left = f32::from(label.left() - pill.left());
+        let right = f32::from(pill.right() - label.right());
+        eprintln!("HOSTCHIP left={left} right_incl_chevron={right} pill_w={}", f32::from(pill.size.width));
+        assert!(left < 8.0, "text starts {left}pt inside the box");
     }
 
     #[gpui::test]

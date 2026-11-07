@@ -315,11 +315,17 @@ impl Protocol {
                         self.done = true;
                     } else {
                         let data = v["data"].get("models").unwrap_or(&v["data"]);
+                        if !data.is_array() {
+                            return Err("Pi model discovery returned no models array".into());
+                        }
                         let signature = data.to_string();
                         if signature != self.pi.catalog_signature {
                             self.pi.catalog_signature = signature;
                             self.pi.catalog_changed = Some(Instant::now());
                         }
+                        // RPC responses are complete snapshots, not additions. Pi's
+                        // scope/auth refresh may remove models seen during startup.
+                        self.pi.catalog_models.clear();
                         for model in data.as_array().into_iter().flatten() {
                             if let (Some(provider), Some(id)) =
                                 (model["provider"].as_str(), model["id"].as_str())
@@ -329,7 +335,8 @@ impl Protocol {
                                     .insert(format!("{provider}/{id}"), model.clone());
                             }
                         }
-                        if self
+                        if !self.pi.catalog_models.is_empty()
+                            && self
                             .pi
                             .catalog_started
                             .is_some_and(|started| started.elapsed() >= Duration::from_secs(5))
@@ -421,10 +428,14 @@ impl Protocol {
                 "native-fast" => self.pi_prompt(stdin)?,
                 "native-stats" => {
                     let usage = &v["data"]["contextUsage"];
-                    events.push(Event::Context {
-                        used: usage["tokens"].as_u64(),
-                        window: usage["contextWindow"].as_u64().or(self.pi.window),
-                    });
+                    // Current Pi stats contain lifetime totals, not contextUsage.
+                    // Do not erase the post-compaction meter with an absent value.
+                    if let Some(used) = usage["tokens"].as_u64() {
+                        events.push(Event::Context {
+                            used: Some(used),
+                            window: usage["contextWindow"].as_u64().or(self.pi.window),
+                        });
+                    }
                     events.extend(self.pi_finish()?);
                 }
                 "native-abort" => events.extend(self.pi_finish()?),
@@ -658,17 +669,26 @@ impl Protocol {
                 self.pi.compacting = false;
                 let state = if v["aborted"] == true {
                     ToolState::Cancelled
-                } else if v["error"].is_string() || v["isError"] == true {
+                } else if v["errorMessage"].is_string() || v["error"].is_string() || v["isError"] == true {
                     ToolState::Failed
                 } else {
                     ToolState::Completed
                 };
                 self.compaction(None, state, &mut events);
+                if let Some(used) = v["result"]["estimatedTokensAfter"].as_u64() {
+                    events.push(Event::Context {
+                        used: Some(used),
+                        window: self.pi.window,
+                    });
+                }
             }
             "agent_end" if v["willRetry"] == true => self.pi.error = None,
             "agent_settled" if !self.pi.finishing => self.pi_settle(stdin)?,
+            // Pi's agent_end is nonterminal: recovery, compaction and queued
+            // work follow it. Only omp still uses the legacy terminal signal.
             "agent_end"
-                if !self.pi.finishing
+                if self.request.kind == Kind::Omp
+                    && !self.pi.finishing
                     && !self.pi.retrying
                     && !self.pi.compacting
                     && v["isTerminal"] != false =>
@@ -772,6 +792,46 @@ mod tests {
         })
     }
     #[test]
+    fn pi_catalog_uses_the_latest_complete_snapshot() {
+        let mut p = protocol(Kind::Pi);
+        p.probe = true;
+        let mut out = Vec::new();
+        p.pi_start(&mut out).unwrap();
+        let scoped = json!({"provider":"p","id":"scoped"});
+        p.frame(json!({"type":"response","id":"native-models","success":true,
+            "data":{"models":[scoped.clone(), {"provider":"p","id":"old"}]}}), &mut out).unwrap();
+        assert_eq!(p.pi.catalog_models.len(), 2);
+        p.pi.catalog_poll = Some(Instant::now());
+        p.pi_tick(&mut out).unwrap();
+        p.frame(json!({"type":"response","id":"native-models","success":true,
+            "data":{"models":[scoped.clone()]}}), &mut out).unwrap();
+        assert_eq!(p.pi.catalog_models.len(), 1);
+        assert!(!p.pi.catalog_models.contains_key("p/old"));
+        p.pi.catalog_started = Some(Instant::now() - Duration::from_secs(6));
+        p.pi.catalog_changed = Some(Instant::now() - Duration::from_secs(2));
+        p.pi.catalog_poll = Some(Instant::now());
+        p.pi_tick(&mut out).unwrap();
+        p.frame(json!({"type":"response","id":"native-models","success":true,
+            "data":{"models":[scoped.clone()]}}), &mut out).unwrap();
+        assert!(p.done);
+        assert_eq!(p.catalog_result.unwrap(), json!({"models":[scoped]}));
+    }
+    #[test]
+    fn pi_catalog_does_not_finish_on_a_transient_empty_snapshot() {
+        let mut p = protocol(Kind::Pi);
+        p.probe = true;
+        let mut out = Vec::new();
+        p.pi_start(&mut out).unwrap();
+        p.pi.catalog_started = Some(Instant::now() - Duration::from_secs(6));
+        p.pi.catalog_changed = Some(Instant::now() - Duration::from_secs(2));
+        p.pi.catalog_signature = "[]".into();
+        p.frame(json!({"type":"response","id":"native-models","success":true,
+            "data":{"models":[]}}), &mut out).unwrap();
+        assert!(!p.done);
+        p.pi.catalog_started = Some(Instant::now() - Duration::from_secs(46));
+        assert!(p.pi_tick(&mut out).unwrap_err().contains("timed out"));
+    }
+    #[test]
     fn prompt_acknowledgements_do_not_finish_a_turn_and_retries_are_kept_alive() {
         for kind in [Kind::Pi, Kind::Omp] {
             let mut p = protocol(kind);
@@ -791,6 +851,10 @@ mod tests {
             assert!(!p.pi.finishing);
             p.frame(json!({"type":"auto_retry_end"}), &mut out).unwrap();
             p.frame(json!({"type":"agent_end"}), &mut out).unwrap();
+            if kind == Kind::Pi {
+                assert!(!p.pi.finishing);
+                p.frame(json!({"type":"agent_settled","aborted":false}), &mut out).unwrap();
+            }
             assert!(p.pi.finishing);
             assert!(!p.done);
             let events = p.frame(json!({"type":"response","id":"native-stats","success":true,"data":{"contextUsage":{"tokens":50,"contextWindow":200000}}}),&mut out).unwrap();
@@ -799,6 +863,45 @@ mod tests {
                 used: Some(50),
                 window: Some(200000)
             }));
+        }
+    }
+    #[test]
+    fn pi_waits_for_compaction_and_queued_work_before_finishing() {
+        let mut p = protocol(Kind::Pi);
+        let mut out = Vec::new();
+        p.pi_start(&mut out).unwrap();
+        p.frame(json!({"type":"agent_end","willRetry":false}), &mut out).unwrap();
+        assert!(!p.pi.finishing);
+        assert!(!p.pi.pending.values().any(|id| *id == "native-stats"));
+        p.frame(json!({"type":"compaction_start","reason":"threshold"}), &mut out).unwrap();
+        let id = p.active_compaction.clone().unwrap();
+        let events = p.frame(json!({"type":"compaction_end","aborted":false,"willRetry":false,
+            "result":{"estimatedTokensAfter":32000}}), &mut out).unwrap();
+        assert_eq!(p.tools[&id].state, ToolState::Completed);
+        assert!(events.contains(&Event::Context { used: Some(32000), window: None }));
+        assert!(!p.done && !p.pi.finishing);
+        p.frame(json!({"type":"agent_start"}), &mut out).unwrap();
+        p.frame(json!({"type":"agent_end","willRetry":false}), &mut out).unwrap();
+        assert!(!p.pi.finishing);
+        p.frame(json!({"type":"agent_settled","aborted":false}), &mut out).unwrap();
+        let events = p.frame(json!({"type":"response","id":"native-stats","success":true,
+            "data":{"tokens":{"input":150000}}}), &mut out).unwrap();
+        assert_eq!(events, vec![Event::Done]);
+        assert!(p.done);
+    }
+    #[test]
+    fn pi_compaction_error_message_is_not_success() {
+        for (end, expected) in [
+            (json!({"type":"compaction_end","aborted":false,"errorMessage":"provider failed"}), ToolState::Failed),
+            (json!({"type":"compaction_end","aborted":true}), ToolState::Cancelled),
+        ] {
+            let mut p = protocol(Kind::Pi);
+            let mut out = Vec::new();
+            p.frame(json!({"type":"compaction_start"}), &mut out).unwrap();
+            let id = p.active_compaction.clone().unwrap();
+            p.frame(end, &mut out).unwrap();
+            assert_eq!(p.tools[&id].state, expected);
+            assert!(!p.pi.finishing && !p.done);
         }
     }
     #[test]

@@ -504,6 +504,8 @@ mod tests {
 
         cx.update(|cx| cx.set_reduce_motion(false));
         let (view, cx) = cx.add_window_view(|_, cx| InkField::new(cx));
+        // ponytail: local pulse slows loops in inactive windows (battery patch).
+        cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
             assert!(view.sim.borrow().greeted);

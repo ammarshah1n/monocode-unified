@@ -59,6 +59,7 @@ mod particle_text;
 mod phase_tile;
 mod pickers;
 mod popover;
+mod power;
 mod project_background;
 mod project_search;
 mod project_settings;
@@ -423,6 +424,7 @@ fn main() {
             dev_reload::install(cx);
             cx.set_global(title_raster);
             image_memory::init(cx);
+            power::init(cx);
             #[cfg(target_os = "macos")]
             memory_log::start(cx);
             frame_log::start(cx);

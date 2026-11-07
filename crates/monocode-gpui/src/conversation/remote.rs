@@ -226,16 +226,24 @@ impl Conversation {
             .update(cx, |view, cx| view.set_saved_draft(draft, cx));
     }
     pub(super) fn remote_send_guard(&mut self, cx: &mut Context<Self>) -> bool {
-        let error = if !self.loaded {
-            Some("Wait for this remote conversation to load.")
+        let error: Option<String> = if !self.loaded {
+            Some("Wait for this remote conversation to load.".into())
         } else if !self.remote_state.online {
-            Some("The machine is offline. Reconnect in Settings → Connections, then Retry.")
+            Some("The machine is offline. Reconnect in Settings → Connections, then Retry.".into())
         } else if self.remote_state.pending {
-            Some(self.remote_state.legacy_recovery_error().unwrap_or(
-                "A remote command needs confirmation. Choose Retry before sending another message.",
-            ))
+            Some(
+                self.remote_state
+                    .legacy_recovery_error()
+                    .unwrap_or(
+                        "A remote command needs confirmation. Choose Retry before sending another message.",
+                    )
+                    .into(),
+            )
         } else if self.busy || self.stopping {
-            Some("Wait for this remote turn to finish before sending another message.")
+            Some(format!(
+                "Wait for this remote turn to finish before sending another message. It is running on {}, not on this Mac.",
+                self.session_host_label()
+            ))
         } else {
             None
         };

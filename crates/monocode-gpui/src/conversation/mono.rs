@@ -181,7 +181,11 @@ impl Conversation {
             return false;
         }
         if self.settings.pending_provider_switch.is_some() && self.busy {
-            self.stop(cx);
+            // Queue retries must not cancel the incoming turn's own handoff.
+            if self.status != "Preparing handoff…" {
+                self.stop(cx);
+            }
+            return false;
         }
         if self.stopping
             || !self.loaded
@@ -1283,6 +1287,41 @@ mod tests {
     use monocode_core::{store::Store, transcript::Transcript};
     use serde_json::json;
     use std::sync::Mutex;
+
+    #[gpui::test]
+    fn redispatch_preserves_incoming_handoff_but_stops_outgoing_turn(cx: &mut TestAppContext) {
+        let mut store = Store::open_monocode(Path::new(":memory:")).unwrap();
+        let session = store.create("pi", "/project").unwrap();
+        let chat = cx.new(|cx| Conversation::new(session, Arc::new(Mutex::new(store)), cx));
+        chat.update(cx, |chat, cx| {
+            chat.loaded = true;
+            chat.busy = true;
+            chat.status = "Preparing handoff…".into();
+            chat.settings.pending_provider_switch = Some(monocode_core::agent::ProviderSwitch {
+                from: "claude".into(),
+                ..Default::default()
+            });
+            let message = Message {
+                id: "queued-user-message".into(),
+                text: "Walk me through this week".into(),
+                sent_at: None,
+                internal: false,
+                error: None,
+                attachments: Vec::new(),
+            };
+            for _ in 0..3 {
+                assert!(!chat.mono_dispatch(&message, cx));
+                assert!(chat.busy);
+                assert!(!chat.stopping);
+                assert!(!chat.cancel.load(Ordering::Relaxed));
+            }
+            // A switch armed during the outgoing turn must still stop that turn.
+            chat.status = "Thinking…".into();
+            assert!(!chat.mono_dispatch(&message, cx));
+            assert!(chat.stopping);
+            assert!(chat.cancel.load(Ordering::Relaxed));
+        });
+    }
 
     #[gpui::test]
     fn long_reports_preserve_card_and_follow_up_positions(cx: &mut TestAppContext) {

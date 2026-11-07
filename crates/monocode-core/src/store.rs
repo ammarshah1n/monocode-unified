@@ -7,7 +7,10 @@ mod monos;
 mod notes;
 mod remote;
 mod remote_legacy;
-pub use remote::{RemoteProject, RemoteSession, RemoteUpload};
+pub use remote::{
+    auto_link_projects, local_project_for_remote, project_cwd_for_host, ProjectMappings,
+    RemoteProject, RemoteSession, RemoteUpload,
+};
 pub(crate) use shared::handle as desktop_session_handle;
 mod session_metadata;
 pub use session_metadata::{MobileSessionMetadata, SessionSidebarMetadata};
@@ -26,7 +29,7 @@ pub use shared::{HistoryPage, PAGE_TURNS};
 pub use side_threads::DesktopSideThread;
 use std::path::Path;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Session {
     pub id: i64,
     pub title: String,
