@@ -295,6 +295,32 @@ mod model_label_tests {
     }
 
     #[gpui::test]
+    fn loaded_claude_catalog_is_the_whole_list(cx: &mut gpui::TestAppContext) {
+        let mut prefs = crate::settings::Preferences::default();
+        prefs.recent_models = ["claude-fable-5-1", "sonnet", "claude-opus-5-5"]
+            .into_iter()
+            .map(|id| crate::settings::ModelChoice {
+                provider: "claude".into(),
+                model: Some(id.into()),
+            })
+            .collect();
+        cx.update(|cx| cx.set_global(prefs));
+        let (window, _picks, _events) =
+            rendered_picker(cx, Kind::Claude, "/work", &["claude-sonnet-5-5", "claude-opus-5-5"]);
+        window
+            .update(cx, |list, _, cx| {
+                list.current = Some("sonnet".into());
+                let ids: Vec<_> = list.entries(cx).into_iter().map(|e| e.id).collect();
+                // Recents first (only those in the catalog), then the rest; no Default.
+                assert_eq!(
+                    ids,
+                    [Some("claude-opus-5-5".into()), Some("claude-sonnet-5-5".into())]
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn star_toggles_a_favorite_without_picking_the_row(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| cx.set_global(crate::settings::Preferences::default()));
         let (window, picks, _events) =
@@ -754,16 +780,30 @@ impl ModelList {
                 .collect();
         };
         let enabled = self.enabled(kind);
-        let mut entries = vec![ModelEntry {
-            kind,
-            id: None,
-            name: "Default".into(),
-            enabled,
-        }];
+        // Local: a loaded Claude catalog is the whole list (the router's
+        // modelPicker replaces the built-ins); no Default row, no stale recents.
+        let curated = (kind == Kind::Claude)
+            .then(|| self.catalogs.iter().find(|(k, _)| *k == kind))
+            .flatten()
+            .map(|(_, models)| models)
+            .filter(|models| models.iter().any(|m| m.id != "default"));
+        let mut entries = if curated.is_some() {
+            Vec::new()
+        } else {
+            vec![ModelEntry {
+                kind,
+                id: None,
+                name: "Default".into(),
+                enabled,
+            }]
+        };
         if let Some(prefs) = cx.try_global::<crate::settings::Preferences>() {
             for choice in &prefs.recent_models {
                 if choice.provider == kind.id()
                     && choice.model.is_some()
+                    && curated.is_none_or(|models| {
+                        models.iter().any(|m| Some(&m.id) == choice.model.as_ref())
+                    })
                     && !entries.iter().any(|entry| entry.id == choice.model)
                 {
                     entries.push(ModelEntry {
@@ -808,6 +848,7 @@ impl ModelList {
         }
         // An override from the environment that the catalog doesn't name.
         if kind == self.provider
+            && curated.is_none()
             && let Some(id) = &self.current
             && !entries.iter().any(|e| e.id.as_ref() == Some(id))
         {

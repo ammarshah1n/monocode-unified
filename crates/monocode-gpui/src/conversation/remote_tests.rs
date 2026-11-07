@@ -60,6 +60,36 @@ fn offline_pending_and_busy_guards_preserve_typed_message(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn busy_remote_guard_and_chip_name_the_machine_the_session_runs_on(cx: &mut TestAppContext) {
+    let view = conversation(cx);
+    cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.configure_project_hosts(
+                "/test-project".into(),
+                true,
+                vec![HostChoice {
+                    environment_id: "remote-ui-tests".into(),
+                    name: "Fedora".into(),
+                    mapped: true,
+                }],
+                None,
+                cx,
+            );
+            view.summary.has_messages = true;
+            assert_eq!(view.selected_host_label(), "Fedora");
+            view.busy = true;
+            view.send(cx);
+            assert!(
+                view.status.contains("running on Fedora, not on this Mac"),
+                "{}",
+                view.status
+            );
+            view.busy = false;
+        })
+    });
+}
+
+#[gpui::test]
 fn remote_capability_and_command_guards_keep_composer_and_attachments(cx: &mut TestAppContext) {
     let view = conversation(cx);
     cx.update(|cx| {

@@ -473,8 +473,11 @@ impl Shell {
             this.close_remote_project(window, cx);
             match event {
                 Picked::Open(key) => {
-                    this.workspace.add_project(key);
-                    this.select_project(key.clone(), window, cx);
+                    let key = key.clone();
+                    this.workspace.add_project(&key);
+                    this.refresh_project_links(cx);
+                    let project = this.canonical_project_path(&key);
+                    this.select_project(project, window, cx);
                 }
                 Picked::Connections => {
                     this.open_settings(crate::settings::Section::Connections, window, cx)

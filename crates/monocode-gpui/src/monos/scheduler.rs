@@ -1517,20 +1517,33 @@ impl Monos {
             return;
         };
         self.ensure_chat(id, cx);
-        let mut inherited = self
-            .chats
-            .get(id)
-            .map(|v| v.read(cx).settings.clone())
-            .unwrap_or_default();
-        let provider = self
-            .chats
-            .get(id)
-            .map(|v| v.read(cx).summary.provider.clone())
-            .unwrap_or_else(|| "codex".into());
+        let chat = self.chats.get(id).map(|v| {
+            let v = v.read(cx);
+            (v.settings.clone(), v.summary.provider.clone())
+        });
+        let saved = mono.session_id;
         let store = self.store.clone();
         let target = id.to_string();
         let work = cx.background_executor().spawn(async move {
             let db = locked(&store)?;
+            // The chat loads asynchronously after launch; until it has, read the
+            // Mono's saved provider and model. Unknown → pi with Astra at max effort.
+            let (mut inherited, provider) = match (chat, saved) {
+                (Some(chat), _) => Some(chat),
+                (None, Some(session)) => db.mono_session(session).ok().flatten().map(|s| {
+                    let settings = db.agent_settings(session).ok().flatten();
+                    (settings.unwrap_or_default(), s.provider)
+                }),
+                (None, None) => None,
+            }
+            .unwrap_or_else(|| {
+                let settings = monocode_core::agent::Settings {
+                    model: Some("openai-codex/gpt-6-astra".into()),
+                    effort: Some("max".into()),
+                    ..Default::default()
+                };
+                (settings, "pi".into())
+            });
             let cwd = std::env::var("HOME").unwrap_or_else(|_| ".".into());
             let mut s = db.create(&provider, &cwd)?;
             s.title = format!("{} · {}", mono.label(), name);

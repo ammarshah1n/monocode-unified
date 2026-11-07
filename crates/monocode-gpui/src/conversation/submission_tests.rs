@@ -24,6 +24,22 @@ fn conversation(cx: &mut TestAppContext) -> WindowHandle<Conversation> {
 }
 
 #[gpui::test]
+fn nonempty_chat_releases_its_empty_session_arcade(cx: &mut TestAppContext) {
+    // Render calls this first; a bare render outside paint now trips the
+    // send morph's frame request, so exercise the release directly.
+    let window = conversation(cx);
+    window
+        .update(cx, |view, _, cx| {
+            view.arcade = Some(cx.new(crate::arcade::Arcade::new));
+            assert!(view.arcade.is_some());
+            view.summary.has_messages = true;
+            view.release_arcade_when_not_empty();
+            assert!(view.arcade.is_none());
+        })
+        .unwrap();
+}
+
+#[gpui::test]
 fn mono_messages_steer_the_ready_provider_once_and_keep_their_send_time(cx: &mut TestAppContext) {
     let window = conversation(cx);
     let (send, receive) = std::sync::mpsc::channel();
@@ -300,4 +316,67 @@ fn stopping_before_the_worker_runs_keeps_the_optimistic_message(cx: &mut TestApp
             })
             .unwrap();
     }
+}
+
+#[gpui::test]
+fn unstarted_local_session_does_not_run_on_this_mac_when_another_host_is_chosen(
+    cx: &mut TestAppContext,
+) {
+    let window = conversation(cx);
+    window
+        .update(cx, |view, _, cx| {
+            view.configure_project_hosts(
+                "/missing/optimistic-send-project".into(),
+                true,
+                vec![HostChoice {
+                    environment_id: "fedora".into(),
+                    name: "Fedora".into(),
+                    mapped: true,
+                }],
+                Some("fedora".into()),
+                cx,
+            );
+            view.input
+                .update(cx, |input, cx| input.set_text("run on Fedora".into(), cx));
+            let (draft, picked) = view.unstarted_composer(cx).unwrap();
+            assert_eq!(draft, "run on Fedora");
+            assert_eq!(picked.model, view.settings.model);
+            view.send(cx);
+            assert!(!view.busy && !view.summary.has_messages);
+            assert!(view.status.contains("Fedora"), "{}", view.status);
+            assert_eq!(view.input.read(cx).content, "run on Fedora");
+            // Once started, the chip names where this session really runs and
+            // only picks the host of the next session.
+            view.summary.has_messages = true;
+            assert!(view.unstarted_composer(cx).is_none());
+            assert_eq!(view.selected_host_label(), "This Mac");
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn busy_local_session_never_reports_a_remote_turn(cx: &mut TestAppContext) {
+    let window = conversation(cx);
+    window
+        .update(cx, |view, _, cx| {
+            view.configure_project_hosts(
+                "/missing/optimistic-send-project".into(),
+                true,
+                vec![HostChoice {
+                    environment_id: "fedora".into(),
+                    name: "Fedora".into(),
+                    mapped: true,
+                }],
+                Some("fedora".into()),
+                cx,
+            );
+            view.summary.has_messages = true;
+            view.busy = true;
+            view.input
+                .update(cx, |input, cx| input.set_text("still local".into(), cx));
+            assert!(!view.is_remote());
+            view.send(cx);
+            assert!(!view.status.contains("remote"), "{}", view.status);
+        })
+        .unwrap();
 }

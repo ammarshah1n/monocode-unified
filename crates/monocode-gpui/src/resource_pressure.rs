@@ -12,6 +12,8 @@ use std::{
 };
 
 const TICK: Duration = Duration::from_millis(500);
+/// How often a backgrounded app checks whether it is in use again.
+const INACTIVE_TICK: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_secs(3);
 const AMBER: u32 = 0xfbbf24;
 const EMERALD: u32 = 0x10b981;
@@ -53,22 +55,26 @@ impl ResourceMonitor {
                 let mut last_tick = Instant::now();
                 let mut last_poll = last_tick;
                 let mut stalls = Duration::ZERO;
+                let mut wait = TICK;
                 loop {
-                    cx.background_executor().timer(TICK).await;
+                    cx.background_executor().timer(wait).await;
                     let now = Instant::now();
                     let late = now
                         .saturating_duration_since(last_tick)
-                        .saturating_sub(TICK);
+                        .saturating_sub(wait);
                     last_tick = now;
                     // A hidden app's timers are throttled; that is not a stall.
                     if cx.update(|cx| cx.active_window().is_none()) {
                         stalls = Duration::ZERO;
                         last_poll = now;
+                        // Nothing is sampled meanwhile: wake rarely.
+                        wait = INACTIVE_TICK;
                         if this.update(cx, |this, _| this.pressure.pause()).is_err() {
                             break;
                         }
                         continue;
                     }
+                    wait = TICK;
                     if late > Duration::from_millis(100) {
                         stalls += late;
                     }

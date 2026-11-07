@@ -53,7 +53,7 @@ mod window_chrome;
 mod worktrees;
 
 use crate::{
-    conversation::{Conversation, SessionChanged},
+    conversation::{Conversation, HostChoice, ProjectHostSelected, SessionChanged},
     input,
     notes::Notes,
     pane_layout::{Edge, LayoutLeaf, Rect, SplitDir},
@@ -654,6 +654,8 @@ pub(crate) struct Shell {
     tabs_frame: Entity<Chrome>,
     store: Database,
     remote: Arc<monocode_core::remote::Connections>,
+    remote_machines: Vec<monocode_core::remote::Machine>,
+    project_links: monocode_core::store::ProjectMappings,
     remote_project_picker: Option<remote_projects::Open>,
     remote_refreshing: bool,
     remote_marks: HashMap<i64, (bool, bool)>,
@@ -877,6 +879,7 @@ impl Shell {
                 std::env::temp_dir().join(format!("monocode-remote-{}", std::process::id()))
             });
         let remote = Arc::new(monocode_core::remote::Connections::new(remote_dir));
+        let remote_machines = remote.list().unwrap_or_default();
         monocode_core::remote::set_default_connections(remote.clone());
         let quit_remote = remote.clone();
         cx.on_app_quit(move |_, cx| {
@@ -887,20 +890,30 @@ impl Shell {
         })
         .detach();
         let remote_clock = cx.spawn(async move |this, cx| {
+            const EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+            let mut wait = EVERY;
             loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(3))
-                    .await;
-                if this
-                    .update(cx, |this, cx| this.refresh_remote_projects(cx))
-                    .is_err()
-                {
-                    break;
+                cx.background_executor().timer(wait).await;
+                // Backgrounded, it backs off; activation refreshes at once.
+                match this.update(cx, |this, cx| {
+                    this.refresh_remote_projects(cx);
+                    crate::power::poll_interval(EVERY, this.window_active, cx)
+                }) {
+                    Ok(next) => wait = next,
+                    Err(_) => break,
                 }
             }
         });
         let metadata: Vec<_> = summaries.iter().map(|s| (s.id, s.cwd.clone())).collect();
-        let workspace = Workspace::restore(saved.as_deref(), &metadata, &cwd);
+        let mut workspace = Workspace::restore(saved.as_deref(), &metadata, &cwd);
+        let project_links = locked(&store)
+            .and_then(|store| store.project_mappings(&workspace.projects))
+            .unwrap_or_default();
+        if let Some(local) =
+            monocode_core::store::local_project_for_remote(&project_links, &workspace.project)
+        {
+            workspace.project = local.to_owned();
+        }
         monocode_core::cli::initialize(&workspace.preferences.binary_paths);
         let latest_state = Arc::new(Mutex::new(serde_json::to_string(&workspace).unwrap()));
         let quit_state = latest_state.clone();
@@ -1046,6 +1059,8 @@ impl Shell {
             tabs_frame,
             store,
             remote,
+            remote_machines,
+            project_links,
             remote_project_picker: None,
             remote_refreshing: false,
             remote_marks: HashMap::new(),
@@ -1375,7 +1390,8 @@ impl Shell {
         self.trim_session_histories(&shown, cx);
     }
     fn add(&mut self, summary: Session, cx: &mut Context<Self>) {
-        self.workspace.add_project(&summary.cwd);
+        let project = self.canonical_project_path(&summary.cwd);
+        self.workspace.add_project(&project);
         self.add_loaded(summary, cx);
     }
     /// Loading history must not turn every session directory into a rail project.
@@ -1389,9 +1405,11 @@ impl Shell {
             .insert(id, cx.new(|_| SessionMark::new(summary.provider.clone())));
         self.tab_marks
             .insert(id, cx.new(|_| SessionMark::tab(summary.provider.clone())));
+        let summary_cwd = summary.cwd.clone();
         let appearance = self.appearance(&summary.cwd);
         let worktree = self.session_worktrees.get(&id).cloned().flatten();
         let view = cx.new(|cx| Conversation::new(summary, self.store.clone(), cx));
+        self.configure_project_hosts(&view, &summary_cwd, cx);
         view.update(cx, |view, cx| {
             // Events may arrive before the first asynchronous agent load. Seed
             // the indexed working directory so those events cannot erase it.
@@ -1405,6 +1423,29 @@ impl Shell {
                 transcript.apply_preferences(&self.workspace.preferences, cx)
             });
         });
+        self.observations.push(cx.subscribe(
+            &view,
+            move |this, _, event: &ProjectHostSelected, cx| {
+                let project = event.0.clone();
+                let selected = event.1.clone();
+                if let Some(environment) = &selected {
+                    this.workspace
+                        .project_hosts
+                        .insert(project.clone(), environment.clone());
+                } else {
+                    this.workspace.project_hosts.remove(&project);
+                }
+                for (&other_id, other) in &this.sessions {
+                    if other_id != id {
+                        other.update(cx, |view, cx| {
+                            view.select_project_host(&project, selected.clone(), cx)
+                        });
+                    }
+                }
+                this.persist(cx);
+                this.follow_host_choice(id, &project, cx);
+            },
+        ));
         self.observations
             .push(cx.subscribe(&view, move |this, _, _: &SessionChanged, cx| {
                 let Some(view) = this.sessions.get(&id) else {
@@ -2140,7 +2181,12 @@ impl Shell {
                 && self
                     .sessions
                     .get(&self.workspace.session_for_pane(*pane))
-                    .is_some_and(|s| s.read(cx).summary.cwd == self.workspace.project)
+                    .is_some_and(|s| {
+                        self.project_matches_session(
+                            &self.workspace.project,
+                            &s.read(cx).summary.cwd,
+                        )
+                    })
                 && self.in_worktree_scope(*pane, cx)
                 && self
                     .workspace
@@ -3531,7 +3577,14 @@ impl Shell {
         let navigation_revision = self.navigation_revision;
         let target = self.workspace.active;
         let store = self.store.clone();
-        let cwd = self.workspace.project.clone();
+        let cwd = target.map_or_else(
+            || self.workspace.project.clone(),
+            |id| {
+                let owner = self.workspace.session_for_pane(id);
+                // The session's own cwd: a remote one must split into its machine.
+                self.session_metadata(owner, cx).summary.cwd.clone()
+            },
+        );
         let worktree = target.and_then(|id| {
             let path = self.session_working_copy(id, cx);
             (monocode_core::files::path_key(path) != monocode_core::files::path_key(&cwd)).then(
@@ -4202,7 +4255,7 @@ impl Shell {
         };
         self.history.record(id);
         self.workspace.open(id);
-        self.workspace.project = view.read(cx).summary.cwd.clone();
+        self.workspace.project = self.canonical_project_path(&view.read(cx).summary.cwd);
         self.workspace
             .project_focus
             .insert(self.workspace.project.clone(), id);
@@ -4339,6 +4392,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let path = self.canonical_project_path(&path);
         self.selected_sessions.clear();
         self.selection_anchor = None;
         self.sidebar_target = None;
@@ -4381,11 +4435,13 @@ impl Shell {
                     && self
                         .session_summaries
                         .contains_key(&self.workspace.session_for_pane(*id))
-                    && self
-                        .session_metadata(self.workspace.session_for_pane(*id), cx)
-                        .summary
-                        .cwd
-                        == path
+                    && self.project_matches_session(
+                        &path,
+                        &self
+                            .session_metadata(self.workspace.session_for_pane(*id), cx)
+                            .summary
+                            .cwd,
+                    )
                     && self.in_worktree_scope(*id, cx)
             })
             .or_else(|| {
@@ -4398,16 +4454,15 @@ impl Shell {
                             &self
                                 .workspace
                                 .session_for_pane(self.workspace.scope_pane(**id)),
-                        ) && self
-                            .session_metadata(
-                                self.workspace
-                                    .session_for_pane(self.workspace.scope_pane(**id)),
-                                cx,
+                        ) && {
+                            let session = self
+                                .workspace
+                                .session_for_pane(self.workspace.scope_pane(**id));
+                            self.project_matches_session(
+                                &path,
+                                &self.session_metadata(session, cx).summary.cwd,
                             )
-                            .summary
-                            .cwd
-                            == path
-                            && self.in_worktree_scope(self.workspace.scope_pane(**id), cx)
+                        } && self.in_worktree_scope(self.workspace.scope_pane(**id), cx)
                     })
                     .map(|tab| self.workspace.tab_focus(*tab))
             });
@@ -4424,11 +4479,22 @@ impl Shell {
         if self.workspace.active.is_some() || self.mono_active(cx) {
             return;
         }
+        let project = self.workspace.project.clone();
+        let target_cwd = match self.new_session_cwd(&project) {
+            Ok((cwd, _)) => cwd,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let remote_target = target_cwd.starts_with("remote://");
         if let Some(id) = self.order.iter().copied().find(|id| {
             let s = self.session_metadata(*id, cx);
-            s.summary.cwd == self.workspace.project
-                && monocode_core::files::path_key(self.session_working_copy(*id, cx))
-                    == monocode_core::files::path_key(self.working_copy())
+            s.summary.cwd == target_cwd
+                && (remote_target
+                    || monocode_core::files::path_key(self.session_working_copy(*id, cx))
+                        == monocode_core::files::path_key(self.working_copy()))
                 && !s.summary.archived
                 && !s.summary.has_messages
                 && !s.busy
@@ -4462,6 +4528,7 @@ impl Shell {
                     let path = path.to_string_lossy().into_owned();
                     let _ = this.update_in(cx, |this, window, cx| {
                         this.workspace.add_project(&path);
+                        this.refresh_project_links(cx);
                         this.select_project(path, window, cx);
                     });
                 }
@@ -4488,35 +4555,56 @@ impl Shell {
         only_if_empty: bool,
         cx: &mut Context<Self>,
     ) {
-        self.create_session_target(choice, only_if_empty, None, cx);
+        self.create_session_target(choice, only_if_empty, None, None, cx);
     }
     fn create_in_folder(&mut self, folder: String, cx: &mut Context<Self>) {
-        self.create_session_target(self.default_choice(), false, Some(folder), cx);
+        self.create_session_target(self.default_choice(), false, Some(folder), None, cx);
     }
+    /// `replacing` is an unstarted session, with its draft and picked model
+    /// controls, that this one takes over.
     fn create_session_target(
         &mut self,
         choice: new_chat_choice::NewChatChoice,
         only_if_empty: bool,
         folder: Option<String>,
+        replacing: Option<(i64, String, monocode_core::agent::Settings)>,
         cx: &mut Context<Self>,
     ) {
         let store = self.store.clone();
         let cwd = self.workspace.project.clone();
-        let focus = self.worktree_focus.get(&cwd).cloned();
+        let (target_cwd, selected_host) = match self.new_session_cwd(&cwd) {
+            Ok(target) => target,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let focus = (!target_cwd.starts_with("remote://"))
+            .then(|| self.worktree_focus.get(&cwd).cloned())
+            .flatten();
         // The project folder as a selected checkout is not a separate worktree.
         let copy = focus.clone().filter(|f| {
             monocode_core::files::path_key(&f.path) != monocode_core::files::path_key(&cwd)
         });
-        let blank_key = format!("{cwd}\0{}", focus.as_ref().map_or("", |f| f.path.as_str()));
+        let blank_key = format!(
+            "{cwd}\0{}\0{}",
+            focus.as_ref().map_or("", |f| f.path.as_str()),
+            selected_host.as_deref().unwrap_or("local")
+        );
         if only_if_empty && !self.pending_project_blanks.insert(blank_key.clone()) {
             return;
         }
         let navigation_revision = self.navigation_revision;
         let defaults = session_loading::NewSessionDefaults::read(choice, &cwd, cx);
+        let carried = replacing.as_ref().map(|(_, _, picked)| picked.clone());
         let work = cx.background_executor().spawn({
             let cwd = cwd.clone();
+            let target_cwd = target_cwd.clone();
             let worktree_cwd = copy.as_ref().map(|f| f.path.clone());
-            async move { defaults.create(&*locked(&store)?, &cwd, worktree_cwd) }
+            async move {
+                defaults.create_at(&*locked(&store)?, &cwd, &target_cwd, worktree_cwd, carried)
+            }
         });
         let previous = self.new_tab_task.take();
         self.new_tab_task = Some(cx.spawn(async move |this, cx| {
@@ -4565,7 +4653,17 @@ impl Shell {
                         }
                         this.order.retain(|s| *s != id);
                         this.order.insert(0, id);
-                        this.activate_session(id, window, cx);
+                        if let Some((old, draft, _)) = replacing {
+                            if let Some(view) = this.sessions.get(&id) {
+                                view.update(cx, |view, cx| {
+                                    view.input.update(cx, |input, cx| input.set_text(draft, cx))
+                                });
+                            }
+                            this.activate_session(id, window, cx);
+                            this.delete_session(old, window, cx);
+                        } else {
+                            this.activate_session(id, window, cx);
+                        }
                     }
                     Err(error) => {
                         this.error = Some(error);
@@ -5514,8 +5612,9 @@ impl Shell {
                         (monos, manager.active.clone())
                     })
                     .unwrap_or_default();
+                let projects = self.visible_project_paths();
                 let picker = cx.new(|cx| {
-                    ProjectPicker::new(&self.workspace.projects, &self.workspace.project, cx)
+                    ProjectPicker::new(&projects, &self.workspace.project, cx)
                         .appearance(self.workspace.project_appearance.clone())
                         .allow_remote()
                         .monos(monos, active, cx)
@@ -5555,8 +5654,9 @@ impl Shell {
             }
             // SidebarWorktreeSwitcher's menu under the project header.
             MenuTarget::Header => {
+                let projects = self.visible_project_paths();
                 let picker = cx.new(|cx| {
-                    ProjectPicker::new(&self.workspace.projects, &self.workspace.project, cx)
+                    ProjectPicker::new(&projects, &self.workspace.project, cx)
                         .appearance(self.workspace.project_appearance.clone())
                         .allow_remote()
                 });
@@ -6079,6 +6179,7 @@ impl Shell {
             || mode.is_some()
             || self.automation_state.session_automations.contains_key(&id);
         let session = self.session_metadata(id, cx);
+        let host_label = self.session_machine_tag(&session.summary.cwd);
         let active = self.selected_sessions.contains(&id)
             || (self.workspace.active == Some(id)
                 && !self.mono_active(cx)
@@ -6230,6 +6331,18 @@ impl Shell {
                 .gap(px(if nested { 6. } else { 8. }))
                 .child(mark)
                 .child(title)
+                .when_some(host_label.clone(), |d, label| {
+                    d.child(
+                        div()
+                            .flex_shrink_0()
+                            .rounded(px(3.))
+                            .px_1()
+                            .text_size(px(9.))
+                            .text_color(content(0.5))
+                            .bg(content(0.06))
+                            .child(label),
+                    )
+                })
                 .when(has_badges, |d| d.child(badges))
                 .child(suffix)
                 .into_any_element()
@@ -6250,6 +6363,18 @@ impl Shell {
                             d.child(icon("pin", 12.).text_color(content(0.45)))
                         })
                         .child(title)
+                        .when_some(host_label.clone(), |d, label| {
+                            d.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .rounded(px(3.))
+                                    .px_1()
+                                    .text_size(px(9.))
+                                    .text_color(content(0.5))
+                                    .bg(content(0.06))
+                                    .child(label),
+                            )
+                        })
                         .child(suffix),
                 )
                 .child(
@@ -6533,7 +6658,7 @@ impl Shell {
                 .monos
                 .as_ref()
                 .is_some_and(|m| m.read(cx).hidden_session(id))
-                && s.summary.cwd == self.workspace.project
+                && self.project_matches_session(&self.workspace.project, &s.summary.cwd)
                 && s.summary.has_messages
                 && !self.orchestration_worker(id)
                 && self.in_sidebar_worktree_scope(id, cx)
@@ -6633,7 +6758,14 @@ impl Shell {
         if self.menu.is_some() {
             return;
         }
-        let projects = self.workspace.visible_project_order();
+        let projects: Vec<_> = self
+            .workspace
+            .visible_project_order()
+            .into_iter()
+            .filter(|p| {
+                monocode_core::store::local_project_for_remote(&self.project_links, p).is_none()
+            })
+            .collect();
         if let Some(next) = adjacent(&projects, Some(&self.workspace.project), step)
             && next != self.workspace.project
         {
@@ -6906,13 +7038,14 @@ impl Shell {
 
     fn project_spaces(&mut self, cx: &mut Context<Self>) -> AnyElement {
         // Sidebar.tsx's ProjectSpacesBar: five equal spaces, paged by chevrons.
-        let shown = self.workspace.projects.len().min(5);
-        let last = self.workspace.projects.len().saturating_sub(shown);
+        let visible_projects = self.visible_project_paths();
+        let shown = visible_projects.len().min(5);
+        let last = visible_projects.len().saturating_sub(shown);
         self.spaces_start = self.spaces_start.min(last);
         let first = self.spaces_start;
         let projects: Vec<_> = self
             .space_reorder
-            .order(&self.workspace.projects)
+            .order(&visible_projects)
             .into_iter()
             .enumerate()
             .skip(first)
@@ -8609,6 +8742,7 @@ impl Render for Shell {
                         if let Some(center) = crate::accounts::get(cx) {
                             center.update(cx, |center, cx| center.app_reactivated(cx));
                         }
+                        this.refresh_remote_projects(cx);
                     }
                 }));
             self.observations
@@ -12440,17 +12574,18 @@ mod tests {
         // and the tab that held it closes.
         window
             .update(cx, |shell, _, cx| {
-                shell.sessions[&a].update(cx, |s, _| {
-                    s.summary.cwd = "/work/monocode".into();
-                    s.summary.has_messages = true;
-                });
+                for id in [a, b] {
+                    shell.sessions[&id].update(cx, |s, _| s.busy = true);
+                }
+                shell.workspace.preferences.working_agents = true;
+                shell.workspace.sidebar_activity_visible = true;
                 shell.invalidate_chrome(cx);
             })
             .unwrap();
         cx.run_until_parked();
         let row = cx
-            .debug_bounds(Box::leak(format!("sidebar-session-{a}").into_boxed_str()))
-            .unwrap()
+            .debug_bounds(Box::leak(format!("live-agent-{a}").into_boxed_str()))
+            .expect("the live-agents strip includes chats from other projects")
             .center();
         let below = point(right.center().x, right.bottom() - px(20.));
         cx.simulate_mouse_down(row, MouseButton::Left, Modifiers::default());
@@ -12469,11 +12604,18 @@ mod tests {
         cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
         window
-            .update(cx, |shell, _, _| {
+            .update(cx, |shell, window, cx| {
                 assert_eq!(shell.workspace.tabs, [b]);
                 assert_eq!(shell.workspace.layout(b).leaf_ids(), [b, new, a]);
                 assert_eq!(shell.workspace.active, Some(a));
+                assert_eq!(shell.workspace.project, "/work/another-project");
+                assert!(shell.visible_tabs(cx).contains(&TitleTab::Session(b)));
                 assert!(shell.pane_drag.is_none());
+                shell.focus_pane(b, window, cx);
+                assert_eq!(shell.workspace.project, "/work/monocode");
+                assert!(shell.visible_tabs(cx).contains(&TitleTab::Session(b)));
+                shell.focus_pane(a, window, cx);
+                assert_eq!(shell.workspace.project, "/work/another-project");
             })
             .unwrap();
         cx.refresh().unwrap();
@@ -12507,6 +12649,20 @@ mod tests {
 
         // A tab press whose release the title bar swallowed stays inert:
         // dragging a pane below never drags that tab.
+        // With the foreign pane gone, b's tab belongs to the other folder and
+        // leaves this folder's strip. The rest of the test runs within one
+        // folder, so both tabs share a strip again.
+        window
+            .update(cx, |shell, w, cx| {
+                assert!(!shell.visible_tabs(cx).contains(&TitleTab::Session(b)));
+                let cwd = shell.session_metadata(b, cx).summary.cwd.clone();
+                shell.sessions[&a].update(cx, |chat, _| chat.summary.cwd = cwd.clone());
+                shell.workspace.tab_workspaces.insert(a, cwd);
+                shell.open(b, w, cx);
+            })
+            .unwrap();
+        cx.refresh().unwrap();
+        cx.run_until_parked();
         let pressed = cx
             .debug_bounds(Box::leak(format!("title-tab-{b}").into_boxed_str()))
             .unwrap()
@@ -12591,6 +12747,34 @@ mod tests {
             })
             .unwrap();
     }
+    #[gpui::test]
+    fn cross_project_split_tabs_stay_visible_and_cmd_d_uses_the_focused_folder(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, foreign, local) = window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.workspace.place(foreign, local, Edge::Left);
+                assert_eq!(shell.workspace.project, "/work/monocode");
+                assert!(shell.visible_tabs(cx).contains(&TitleTab::Session(local)));
+                shell.split_session(SplitDir::Right, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                let created = shell.workspace.active.unwrap();
+                assert_eq!(
+                    shell.session_metadata(created, cx).summary.cwd,
+                    "/work/another-project"
+                );
+                assert_eq!(shell.workspace.project, "/work/another-project");
+                assert!(shell.workspace.layout(local).leaf_ids().contains(&foreign));
+                assert!(shell.visible_tabs(cx).contains(&TitleTab::Session(local)));
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn a_split_pane_slides_in_from_its_edge_then_settles(cx: &mut TestAppContext) {
         let (window, new, b) = same_project_window(cx);

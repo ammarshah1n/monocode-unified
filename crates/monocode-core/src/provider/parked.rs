@@ -353,27 +353,42 @@ pub(super) fn put(wire: Wire, mut protocol: Protocol) {
     });
     drop(pool);
     enforce_idle_limit();
-    static WATCH: OnceLock<()> = OnceLock::new();
-    WATCH.get_or_init(|| {
-        thread::spawn(|| loop {
-            thread::sleep(Duration::from_secs(1));
-            let mut pool = idle_pool().lock().unwrap();
-            let limit = LIMIT.load(Ordering::Relaxed);
-            let mut ix = 0;
-            while ix < pool.len() {
-                if limit == 0
-                    || pool[ix].at.elapsed() >= Duration::from_secs(180)
-                    || pool[ix].wire.child.try_wait().ok().flatten().is_some()
-                {
-                    pool.remove(ix);
+    // The watcher sweeps expired or exited processes once a second while any
+    // is parked, and sleeps until the next park once the pool is empty.
+    static WATCH: OnceLock<thread::Thread> = OnceLock::new();
+    WATCH
+        .get_or_init(|| {
+            thread::spawn(|| loop {
+                sweep();
+                if idle_pool().lock().unwrap().is_empty() {
+                    // `put` unparks it; a park that raced ahead leaves a token.
+                    thread::park();
                 } else {
-                    ix += 1;
+                    thread::sleep(Duration::from_secs(1));
                 }
-            }
-            drop(pool);
-            enforce_idle_limit();
-        });
-    });
+            })
+            .thread()
+            .clone()
+        })
+        .unpark();
+}
+
+fn sweep() {
+    let mut pool = idle_pool().lock().unwrap();
+    let limit = LIMIT.load(Ordering::Relaxed);
+    let mut ix = 0;
+    while ix < pool.len() {
+        if limit == 0
+            || pool[ix].at.elapsed() >= Duration::from_secs(180)
+            || pool[ix].wire.child.try_wait().ok().flatten().is_some()
+        {
+            pool.remove(ix);
+        } else {
+            ix += 1;
+        }
+    }
+    drop(pool);
+    enforce_idle_limit();
 }
 
 /// Stop settles after the provider interrupt is written/acknowledged. Keep the
